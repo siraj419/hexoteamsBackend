@@ -43,3 +43,4 @@ class NotificationSummaryResponse(BaseModel):
     project_chats: List[UnreadCountResponse]
     direct_messages: List[UnreadCountResponse]
 
+

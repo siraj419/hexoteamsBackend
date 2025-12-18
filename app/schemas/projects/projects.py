@@ -1,11 +1,9 @@
 from pydantic import BaseModel, UUID4, Field, AnyUrl
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, List
 from datetime import date, datetime
 
 from enum import Enum
-
-if TYPE_CHECKING:
-    from app.schemas.activities import ActivityResponse
+from app.schemas.activities import ActivityResponse
 
 class ProjectTasksView(Enum):
     LIST = "list"
@@ -163,5 +161,5 @@ class ProjectSummaryResponse(BaseModel):
     latest_links: List[ProjectLinkSummary] = []
     task_summary: TaskSummary
     team_workload: TeamWorkload
-    recent_activities: List["ActivityResponse"] = []
+    recent_activities: List[ActivityResponse] = []
     
