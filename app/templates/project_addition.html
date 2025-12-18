@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>You've been added to projects in {{org_name}}</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f4f4f4;
+            line-height: 1.6;
+        }
+        .email-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+        }
+        .email-header {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            padding: 40px 20px;
+            text-align: center;
+            color: #ffffff;
+        }
+        .email-header h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        .email-body {
+            padding: 40px 30px;
+            color: #333333;
+        }
+        .email-body h2 {
+            color: #333333;
+            font-size: 24px;
+            margin-top: 0;
+            margin-bottom: 20px;
+        }
+        .email-body p {
+            color: #666666;
+            font-size: 16px;
+            margin-bottom: 20px;
+        }
+        .project-details {
+            background-color: #f0fdf4;
+            border-left: 4px solid #10b981;
+            padding: 20px;
+            margin: 30px 0;
+            border-radius: 4px;
+        }
+        .project-details p {
+            margin: 8px 0;
+            color: #333333;
+        }
+        .project-details strong {
+            color: #059669;
+        }
+        .button-container {
+            text-align: center;
+            margin: 40px 0;
+        }
+        .view-button {
+            display: inline-block;
+            padding: 14px 40px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: #ffffff !important;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 16px;
+            box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+            transition: transform 0.2s;
+        }
+        .view-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(16, 185, 129, 0.4);
+        }
+        .email-footer {
+            background-color: #f8f9fa;
+            padding: 30px;
+            text-align: center;
+            color: #999999;
+            font-size: 14px;
+            border-top: 1px solid #e9ecef;
+        }
+        .email-footer p {
+            margin: 5px 0;
+            color: #999999;
+        }
+        .divider {
+            height: 1px;
+            background-color: #e9ecef;
+            margin: 30px 0;
+        }
+        .icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        @media only screen and (max-width: 600px) {
+            .email-body {
+                padding: 30px 20px;
+            }
+            .email-header h1 {
+                font-size: 24px;
+            }
+            .view-button {
+                padding: 12px 30px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="email-header">
+            <div class="icon">✓</div>
+            <h1>You've been added!</h1>
+        </div>
+        
+        <div class="email-body">
+            <h2>Welcome to new projects</h2>
+            <p>Hello,</p>
+            <p><strong>{{inviter_name}}</strong> has added you to the following project(s) in <strong>{{org_name}}</strong>:</p>
+            
+            <div class="project-details">
+                <p><strong>Organization:</strong> {{org_name}}</p>
+                <p><strong>Project(s):</strong> {{project_names}}</p>
+                <p><strong>Added by:</strong> {{inviter_name}}</p>
+            </div>
+            
+            <p>You now have access to these projects and can start collaborating with your team. Log in to your account to view and work on these projects.</p>
+            
+            <div class="button-container">
+                <a href="{{frontend_url}}" class="view-button">View Projects</a>
+            </div>
+            
+            <div class="divider"></div>
+            
+            <p style="font-size: 14px; color: #999999;">
+                If you have any questions or need assistance, please contact your team administrator.
+            </p>
+        </div>
+        
+        <div class="email-footer">
+            <p>This is an automated notification from {{org_name}}</p>
+            <p>Please do not reply to this email</p>
+        </div>
+    </div>
+</body>
+</html>
+

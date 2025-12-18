@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: team_management_redis
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: team_management_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: team_management_backend
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - S3_USE_SSL=false
+      - S3_BUCKET_NAME=team-management
+      - AWS_REGION=us-east-1
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_network
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: team_management_celery_worker
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - S3_USE_SSL=false
+      - S3_BUCKET_NAME=team-management
+      - AWS_REGION=us-east-1
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - backend_network
+    restart: unless-stopped
+    command: celery -A app.core.celery worker --loglevel=info
+
+volumes:
+  redis_data:
+  minio_data:
+
+networks:
+  backend_network:
+    driver: bridge
+

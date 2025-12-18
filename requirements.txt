@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic[email]
+python-dotenv
+pydantic_settings
+supabase
+boto3
+aiosmtplib
+celery[redis]
+redis
+python-multipart
+pillow
+httpx
