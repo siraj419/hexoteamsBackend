@@ -7,3 +7,5 @@ INBOX_IMPLEMENTATION_SUMMARY.md
 .env
 Dockerfile
 docker-compose.yml
+DOCKER_SETUP.md
+.dockerignore
