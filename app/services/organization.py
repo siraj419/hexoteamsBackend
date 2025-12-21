@@ -358,7 +358,7 @@ class OrganizationService:
             response = supabase.table('organization_members').insert({
                 'org_id': str(organization_id),
                 'user_id': str(user_id),
-                'role': role.value,
+                'role': role,
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).execute()
