@@ -54,7 +54,7 @@ class OrganizationService:
             )
             
         # create the organization member
-        self._add_organization_member(response.data[0]['id'], user_id, OrganizationMemberRole.OWNER.value)
+        self._add_organization_member(response.data[0]['id'], user_id, OrganizationMemberRole.OWNER)
         
         return OrganizationCreateResponse(
             id=response.data[0]['id'],
