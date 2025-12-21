@@ -24,6 +24,7 @@ from app.schemas.auth import (
 )
 from app.services.auth import AuthService
 from app.routers.deps import get_current_user
+from app.utils.redis_cache import UserMeCache
 
 router = APIRouter()
 
@@ -88,6 +89,12 @@ def get_me(user: any = Depends(get_current_user)):
     """
         Get the current user
     """
+    user_id_str = str(user.id)
+    
+    cached_user = UserMeCache.get_user(user_id_str)
+    if cached_user:
+        return User(**cached_user)
+    
     display_name = (
         user.user_metadata.get('display_name') or
         user.user_metadata.get('name') or
@@ -95,13 +102,17 @@ def get_me(user: any = Depends(get_current_user)):
         user.email.split('@')[0] if user.email else 'User'
     )
     
-    return  User(
-                id=user.id,
-                display_name=display_name,
-                email=user.email,
-                created_at=user.created_at,
-                updated_at=user.updated_at
-            )
+    user_response = User(
+        id=user.id,
+        display_name=display_name,
+        email=user.email,
+        created_at=user.created_at,
+        updated_at=user.updated_at
+    )
+    
+    UserMeCache.set_user(user_id_str, user_response.model_dump(mode='json'))
+    
+    return user_response
 
 @router.post("/change-password", response_model=AuthChangePasswordResponse, status_code=status.HTTP_200_OK)
 def change_password(auth_request: AuthChangePasswordRequest, user: any = Depends(get_current_user)):

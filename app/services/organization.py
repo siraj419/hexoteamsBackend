@@ -18,6 +18,7 @@ from app.schemas.organizations import (
 from app.utils import random_color, random_icon
 from app.services.files import FilesService
 from app.core import settings
+from app.utils.redis_cache import ActiveOrganizationCache
 
 class OrganizationService:
     def __init__(self):
@@ -281,6 +282,8 @@ class OrganizationService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to set active organization: {e}"
             )
+        
+        ActiveOrganizationCache.delete_organization(str(user_id))
             
         return True
     
@@ -288,10 +291,14 @@ class OrganizationService:
         self,
         user_id: UUID4
     ) -> OrganizationGetResponse:
-
+        user_id_str = str(user_id)
+        
+        cached_org = ActiveOrganizationCache.get_organization(user_id_str)
+        if cached_org:
+            return OrganizationGetResponse(**cached_org)
         
         try:
-            response = supabase.table('organization_members').select('organizations(*)').eq('user_id', str(user_id)).eq('active', True).execute()
+            response = supabase.table('organization_members').select('organizations(*)').eq('user_id', user_id_str).eq('active', True).execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -307,8 +314,8 @@ class OrganizationService:
         avatar_url = None
         if response.data[0]['organizations']['avatar_file_id']:
             avatar_url = self.files_service.get_file_url(response.data[0]['organizations']['avatar_file_id'])
-                    
-        return OrganizationGetResponse(
+        
+        org_response = OrganizationGetResponse(
             id=response.data[0]['organizations']['id'],
             name=response.data[0]['organizations']['name'],
             description=response.data[0]['organizations']['description'],
@@ -316,6 +323,10 @@ class OrganizationService:
             avatar_icon=response.data[0]['organizations']['avatar_icon'],
             avatar_url=avatar_url,
         )
+        
+        ActiveOrganizationCache.set_organization(user_id_str, org_response.model_dump(mode='json'))
+        
+        return org_response
     
     def deactivate_active_organization(
         self,
@@ -332,6 +343,7 @@ class OrganizationService:
                 detail=f"Failed to deactivate active organization: {e}"
             )
 
+        ActiveOrganizationCache.delete_organization(str(user_id))
             
         return True
     

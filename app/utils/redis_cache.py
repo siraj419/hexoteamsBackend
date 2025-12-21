@@ -120,3 +120,97 @@ class ProjectSummaryCache:
         except Exception as e:
             logger.warning(f"Error deleting project summary from cache: {e}")
 
+
+class ActiveOrganizationCache:
+    """Cache utility for active organization information"""
+    
+    CACHE_TTL = 300  # 5 minutes cache for active organization
+    
+    @staticmethod
+    def get_organization(user_id: str) -> Optional[Dict[str, Any]]:
+        """Get active organization from cache"""
+        if not redis_client:
+            return None
+        
+        try:
+            cached = redis_client.get(f"active_org:{user_id}")
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.warning(f"Error getting active organization from cache: {e}")
+        
+        return None
+    
+    @staticmethod
+    def set_organization(user_id: str, org_data: Dict[str, Any]) -> None:
+        """Cache active organization data"""
+        if not redis_client:
+            return
+        
+        try:
+            redis_client.setex(
+                f"active_org:{user_id}",
+                ActiveOrganizationCache.CACHE_TTL,
+                json.dumps(org_data)
+            )
+        except Exception as e:
+            logger.warning(f"Error caching active organization: {e}")
+    
+    @staticmethod
+    def delete_organization(user_id: str) -> None:
+        """Invalidate active organization cache"""
+        if not redis_client:
+            return
+        
+        try:
+            redis_client.delete(f"active_org:{user_id}")
+        except Exception as e:
+            logger.warning(f"Error deleting active organization from cache: {e}")
+
+
+class UserMeCache:
+    """Cache utility for user /me endpoint response"""
+    
+    CACHE_TTL = 300  # 5 minutes cache for user me endpoint
+    
+    @staticmethod
+    def get_user(user_id: str) -> Optional[Dict[str, Any]]:
+        """Get user me data from cache"""
+        if not redis_client:
+            return None
+        
+        try:
+            cached = redis_client.get(f"user_me:{user_id}")
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.warning(f"Error getting user me from cache: {e}")
+        
+        return None
+    
+    @staticmethod
+    def set_user(user_id: str, user_data: Dict[str, Any]) -> None:
+        """Cache user me data"""
+        if not redis_client:
+            return
+        
+        try:
+            redis_client.setex(
+                f"user_me:{user_id}",
+                UserMeCache.CACHE_TTL,
+                json.dumps(user_data)
+            )
+        except Exception as e:
+            logger.warning(f"Error caching user me: {e}")
+    
+    @staticmethod
+    def delete_user(user_id: str) -> None:
+        """Invalidate user me cache"""
+        if not redis_client:
+            return
+        
+        try:
+            redis_client.delete(f"user_me:{user_id}")
+        except Exception as e:
+            logger.warning(f"Error deleting user me from cache: {e}")
+
