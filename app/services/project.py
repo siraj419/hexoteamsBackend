@@ -666,39 +666,40 @@ class ProjectService:
                 ))
             
             # 3. Get top 5 latest project links
-            link_service = LinkService()
-            links_response = link_service.get_links(
-                project_id,
-                LinkEntityType.PROJECT,
-                limit=5,
-                offset=0
-            )
-            
-            latest_links = []
-            for link in links_response.links[:5]:
-                # Get created_at from links table
-                try:
-                    link_detail = supabase.table('links').select('created_at').eq('id', str(link.id)).execute()
-                    if link_detail.data and link_detail.data[0].get('created_at'):
-                        created_at_str = link_detail.data[0]['created_at']
-                        if isinstance(created_at_str, str):
-                            created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                            if created_at.tzinfo is None:
-                                created_at = created_at.replace(tzinfo=timezone.utc)
-                        else:
-                            created_at = datetime.now(timezone.utc)
-                    else:
-                        created_at = datetime.now(timezone.utc)
-                except Exception as e:
-                    logger.warning(f"Failed to get link created_at: {e}")
-                    created_at = datetime.now(timezone.utc)
+            try:
+                links_response = supabase.table('links').select(
+                    'id, title, link_url, created_at'
+                ).eq('entity_id', project_id_str).eq('entity_type', LinkEntityType.PROJECT.value).order(
+                    'created_at', desc=True
+                ).limit(5).execute()
                 
-                latest_links.append(ProjectLinkSummary(
-                    id=link.id,
-                    title=link.title,
-                    link_url=str(link.link_url),
-                    created_at=created_at
-                ))
+                latest_links = []
+                if links_response.data:
+                    for link_data in links_response.data:
+                        try:
+                            created_at_str = link_data.get('created_at')
+                            if created_at_str:
+                                if isinstance(created_at_str, str):
+                                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                                    if created_at.tzinfo is None:
+                                        created_at = created_at.replace(tzinfo=timezone.utc)
+                                else:
+                                    created_at = datetime.now(timezone.utc)
+                            else:
+                                created_at = datetime.now(timezone.utc)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse link created_at: {e}")
+                            created_at = datetime.now(timezone.utc)
+                        
+                        latest_links.append(ProjectLinkSummary(
+                            id=UUID4(link_data['id']),
+                            title=link_data.get('title'),
+                            link_url=str(link_data.get('link_url', '')),
+                            created_at=created_at
+                        ))
+            except Exception as e:
+                logger.error(f"Failed to get project links: {str(e)}")
+                latest_links = []
             
             # 4. Get task summary
             now = datetime.now(timezone.utc)
