@@ -24,6 +24,7 @@ from app.schemas.projects import (
     TaskSummary,
     TeamWorkload,
     UserWorkload,
+    ProjectResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
 from app.services.files import FilesService
@@ -711,10 +712,10 @@ class ProjectService:
             
             if tasks_response.data:
                 for task in tasks_response.data:
-                    status = task.get('status')
+                    task_status = task.get('status')
                     due_date = task.get('due_date')
                     
-                    if status == TaskStatus.COMPLETED.value:
+                    if task_status == TaskStatus.COMPLETED.value:
                         completed += 1
                     else:
                         incomplete += 1
