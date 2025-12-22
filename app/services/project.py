@@ -2,7 +2,7 @@ from fastapi import HTTPException, status
 from pydantic import UUID4
 from supabase_auth.errors import AuthApiError
 from typing import Optional, List, Any, Dict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from fastapi import UploadFile
 
 from app.core import supabase
