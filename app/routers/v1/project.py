@@ -19,6 +19,7 @@ from app.schemas.projects import (
     NonMemberProjectsResponse,
     ArchivedProjectsResponse,
     ProjectSummaryResponse,
+    ProjectAddMemberRequest,
 )
 from app.schemas.organizations import OrganizationMemberRole
 
