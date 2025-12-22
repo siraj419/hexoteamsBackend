@@ -786,8 +786,7 @@ class TeamService:
         from app.core.config import Settings
         settings = Settings()
         
-        # Use a default frontend URL if not configured
-        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = settings.FRONTEND_URL
         accept_url = f"{frontend_url}/accept-invitation?token={token}"
         
         subject = f"You've been invited to join {org_name}"
@@ -831,7 +830,7 @@ class TeamService:
         settings = Settings()
         
         project_names = self._get_project_names(project_ids)
-        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = settings.FRONTEND_URL
         
         subject = f"You've been added to projects in {org_name}"
         template_vars = {

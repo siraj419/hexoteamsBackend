@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_KEY: str
     
+    # Frontend URL (for email redirections)
+    FRONTEND_URL: str = Field('http://localhost:3000', description="Frontend application URL used in email redirections")
+    
     # OAuth Settings
     OAUTH_REDIRECT_URL: str = Field('http://localhost:8002/api/v1/auth/oauth/callback', description="Backend OAuth callback URL (provider will redirect here)")
     OAUTH_FRONTEND_SUCCESS_URL: str = Field('http://localhost:8080/auth/success', description="Frontend URL to redirect to after successful OAuth")

@@ -251,6 +251,9 @@ class NotificationService:
     ):
         """Send email notification"""
         try:
+            from app.core.config import Settings
+            settings = Settings()
+            
             user_email = self._get_user_email(user_id)
             
             if not user_email:
@@ -263,6 +266,7 @@ class NotificationService:
                 'title': title,
                 'message': message,
                 'event_type': event_type.value,
+                'frontend_url': settings.FRONTEND_URL,
             }
             
             send_email_task.delay(
