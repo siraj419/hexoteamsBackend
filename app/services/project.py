@@ -527,7 +527,7 @@ class ProjectService:
         cached_summary = ProjectSummaryCache.get_summary(project_id_str)
         if cached_summary:
             try:
-                # If cached summary doesn't have project info, fetch it
+                # Ensure project info exists and has favourite_project field
                 if not cached_summary.get('project'):
                     # Fetch project info and add to cached summary
                     project_response = supabase.table('projects').select('*').eq('id', project_id_str).execute()
@@ -561,10 +561,19 @@ class ProjectService:
                             favourite_project=self._is_favourite_project(UUID4(project_data['id']), user_id),
                         )
                         cached_summary['project'] = project_info.model_dump(mode='json')
+                else:
+                    # Update cached project with favourite_project field if missing or invalid
+                    cached_project = cached_summary.get('project', {})
+                    if isinstance(cached_project, dict):
+                        # Ensure favourite_project is a boolean, not a list or other type
+                        if 'favourite_project' not in cached_project or not isinstance(cached_project.get('favourite_project'), bool):
+                            cached_project['favourite_project'] = self._is_favourite_project(project_id, user_id)
+                            cached_summary['project'] = cached_project
                 
                 return ProjectSummaryResponse(**cached_summary)
             except Exception as e:
-                logger.warning(f"Failed to parse cached summary: {e}")
+                logger.error(f"Error getting project summary: {e}")
+                # If cache parsing fails, fall through to fetch from database
         
         # Cache miss - fetch all data
         try:
