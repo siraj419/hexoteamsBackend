@@ -249,8 +249,11 @@ class ProjectService:
         except Exception as e:
             logger.error(f"Failed to record project creation activity: {str(e)}", exc_info=True)
         
+        project_id = UUID4(response.data[0]['id'])
+        members = self._get_project_members(project_id)
+        
         return ProjectCreateResponse(
-            id=response.data[0]['id'],
+            id=project_id,
             name=response.data[0]['name'],
             org_id=response.data[0]['org_id'],
             avatar_color=project_request.avatar_color,
@@ -260,6 +263,7 @@ class ProjectService:
             end_date=response.data[0]['end_date'],
             view=response.data[0]['view'],
             progress_percentage=response.data[0]['progress_percentage'],
+            members=members,
         )
         
     def get_projects(
@@ -315,10 +319,13 @@ class ProjectService:
             avatar_url = None
             if project['avatar_file_id']:
                 avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+            
+            project_id = UUID4(project['id'])
+            members = self._get_project_members(project_id)
                 
             projects.append(
                 ProjectGetResponse(
-                    id=project['id'],
+                    id=project_id,
                     name=project['name'],
                     org_id=project['org_id'],
                     avatar_color=project['avatar_color'],
@@ -328,6 +335,7 @@ class ProjectService:
                     end_date=project['end_date'],
                     view=project['view'],
                     progress_percentage=project['progress_percentage'],
+                    members=members,
                 )
             )
         
@@ -372,8 +380,12 @@ class ProjectService:
             avatar_url = None
             if project['avatar_file_id']:
                 avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+            
+            project_id = UUID4(project['id'])
+            members = self._get_project_members(project_id)
+            
             projects.append(ProjectGetResponse(
-                id=project['id'],
+                id=project_id,
                 name=project['name'],
                 org_id=project['org_id'],
                 avatar_color=project['avatar_color'],
@@ -383,6 +395,7 @@ class ProjectService:
                 end_date=project['end_date'],
                 view=project['view'],
                 progress_percentage=project['progress_percentage'],
+                members=members,
             ))
         
         return ArchivedProjectsResponse(
@@ -424,8 +437,12 @@ class ProjectService:
             avatar_url = None
             if project['avatar_file_id']:
                 avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+            
+            project_id = UUID4(project['id'])
+            members = self._get_project_members(project_id)
+            
             projects.append(ProjectGetResponse(
-                id=project['id'],
+                id=project_id,
                 name=project['name'],
                 org_id=project['org_id'],
                 avatar_color=project['avatar_color'],
@@ -435,6 +452,7 @@ class ProjectService:
                 end_date=project['end_date'],
                 view=project['view'],
                 progress_percentage=project['progress_percentage'],
+                members=members,
             ))
         
         return NonMemberProjectsResponse(
@@ -467,6 +485,7 @@ class ProjectService:
         if response.data[0]['avatar_file_id']:
             avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
         
+        members = self._get_project_members(project_id)
         
         return ProjectGetResponse(
             id=response.data[0]['id'],
@@ -481,6 +500,7 @@ class ProjectService:
             status=response.data[0]['status'],
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
+            members=members,
         )
     
     def get_project_summary(
@@ -773,6 +793,33 @@ class ProjectService:
                 'avatar_url': None
             }
     
+    def _get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
+        """
+        Get project members with user info using Redis caching.
+        Returns a list of ProjectMemberSummary with id, display_name, and avatar_url.
+        """
+        project_id_str = str(project_id)
+        members = []
+        
+        try:
+            members_response = supabase.table('project_members').select(
+                'user_id'
+            ).eq('project_id', project_id_str).execute()
+            
+            if members_response.data:
+                user_ids = [UUID4(member['user_id']) for member in members_response.data]
+                for user_id in user_ids:
+                    user_info = self._get_user_info_with_cache(user_id)
+                    members.append(ProjectMemberSummary(
+                        id=user_id,
+                        display_name=user_info.get('display_name'),
+                        avatar_url=user_info.get('avatar_url')
+                    ))
+        except Exception as e:
+            logger.error(f"Error getting project members for project {project_id_str}: {str(e)}")
+        
+        return members
+    
     def delete_project(
         self,
         project_id: UUID4
@@ -961,8 +1008,12 @@ class ProjectService:
             avatar_url = None
             if project['projects']['avatar_file_id']:
                 avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+            
+            project_id = UUID4(project['projects']['id'])
+            members = self._get_project_members(project_id)
+            
             projects.append(ProjectGetResponse(
-                id=project['projects']['id'],
+                id=project_id,
                 name=project['projects']['name'],
                 org_id=project['projects']['org_id'],
                 avatar_color=project['projects']['avatar_color'],
@@ -972,6 +1023,7 @@ class ProjectService:
                 end_date=project['projects']['end_date'],
                 view=project['projects']['view'],
                 progress_percentage=project['projects']['progress_percentage'],
+                members=members,
             ))
         
         return projects

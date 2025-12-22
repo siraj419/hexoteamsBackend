@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, UUID4, Field, AnyUrl
 from typing import Optional, List
 from datetime import date, datetime
@@ -44,6 +46,7 @@ class ProjectResponse(BaseModel):
     end_date: Optional[date] = None
     view: Optional[ProjectTasksView] = ProjectTasksView.LIST
     progress_percentage: Optional[int] = 0
+    members: List['ProjectMemberSummary'] = []
 
 class AllProjectsResponse(BaseModel):
     member_projects: List[ProjectResponse]
