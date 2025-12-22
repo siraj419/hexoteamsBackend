@@ -70,6 +70,55 @@ def get_project_member_for_attachments(project_id: UUID4, user: any = Depends(ge
     
     return response.data[0]
 
+def get_project_access(project_id: UUID4, user: any = Depends(get_current_user), active_organization: any = Depends(get_active_organization)):
+    """
+    Check if user has access to project:
+    - User is a project member, OR
+    - User is organization admin/owner
+    """
+    from app.core import supabase
+    from supabase_auth.errors import AuthApiError
+    
+    # Check if user is a project member
+    try:
+        member_response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
+        if member_response.data and len(member_response.data) > 0:
+            return {
+                'has_access': True,
+                'is_member': True,
+                'member_data': member_response.data[0]
+            }
+    except AuthApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check project membership: {e}"
+        )
+    
+    # Check if user is org admin/owner
+    org_member_role = active_organization.get('member_role')
+    if org_member_role in [OrganizationMemberRole.ADMIN.value, OrganizationMemberRole.OWNER.value]:
+        # Verify project belongs to the organization
+        try:
+            project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
+            if project_response.data and len(project_response.data) > 0:
+                project_org_id = project_response.data[0]['org_id']
+                if str(project_org_id) == str(active_organization['id']):
+                    return {
+                        'has_access': True,
+                        'is_member': False,
+                        'member_data': None
+                    }
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to verify project organization: {e}"
+            )
+    
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="User does not have access to this project"
+    )
+
 def _get_user_timezone(user_id: UUID4) -> str:
     from app.core import supabase
     from supabase_auth.errors import AuthApiError
@@ -224,16 +273,17 @@ def join_project(
         org_id=active_organization['id']
     )
 
-# @router.get("/{project_id}", response_model=ProjectGetResponse, status_code=status.HTTP_200_OK)
-# def get_project(
-#     project_id: UUID4,
-#     user: any = Depends(get_organization_member),
-# ):
-#     """
-#         Get a project by its ID
-#     """
-#     project_service = ProjectService()
-#     return project_service.get_project(project_id)
+@router.get("/{project_id}", response_model=ProjectGetResponse, status_code=status.HTTP_200_OK)
+def get_project(
+    project_id: UUID4,
+    access: any = Depends(get_project_access),
+):
+    """
+        Get a project by its ID.
+        User must be a project member or organization admin/owner.
+    """
+    project_service = ProjectService()
+    return project_service.get_project(project_id)
 
 # @router.put("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
 # def update_project(

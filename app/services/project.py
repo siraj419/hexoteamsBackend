@@ -519,27 +519,107 @@ class ProjectService:
         cached_summary = ProjectSummaryCache.get_summary(project_id_str)
         if cached_summary:
             try:
+                # If cached summary doesn't have project info, fetch it
+                if not cached_summary.get('project'):
+                    # Fetch project info and add to cached summary
+                    project_response = supabase.table('projects').select('*').eq('id', project_id_str).execute()
+                    if project_response.data and len(project_response.data) > 0:
+                        project_data = project_response.data[0]
+                        avatar_url = None
+                        if project_data.get('avatar_file_id'):
+                            avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
+                        
+                        view_value = project_data.get('view', ProjectTasksView.LIST.value)
+                        if isinstance(view_value, str):
+                            try:
+                                view = ProjectTasksView(view_value)
+                            except ValueError:
+                                view = ProjectTasksView.LIST
+                        else:
+                            view = ProjectTasksView.LIST
+                        
+                        project_info = ProjectResponse(
+                            id=UUID4(project_data['id']),
+                            name=project_data['name'],
+                            org_id=UUID4(project_data['org_id']),
+                            avatar_color=project_data.get('avatar_color'),
+                            avatar_icon=project_data.get('avatar_icon'),
+                            avatar_url=avatar_url,
+                            start_date=project_data['start_date'],
+                            end_date=project_data.get('end_date'),
+                            view=view,
+                            progress_percentage=project_data.get('progress_percentage', 0),
+                            members=cached_summary.get('members', [])
+                        )
+                        cached_summary['project'] = project_info.model_dump(mode='json')
+                
                 return ProjectSummaryResponse(**cached_summary)
             except Exception as e:
                 logger.warning(f"Failed to parse cached summary: {e}")
         
         # Cache miss - fetch all data
         try:
-            # 1. Get project members with user info
+            # 0. Get project basic information
+            project_response = supabase.table('projects').select('*').eq('id', project_id_str).execute()
+            if not project_response.data or len(project_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found"
+                )
+            
+            project_data = project_response.data[0]
+            avatar_url = None
+            if project_data.get('avatar_file_id'):
+                avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
+            
+            view_value = project_data.get('view', ProjectTasksView.LIST.value)
+            if isinstance(view_value, str):
+                try:
+                    view = ProjectTasksView(view_value)
+                except ValueError:
+                    view = ProjectTasksView.LIST
+            else:
+                view = ProjectTasksView.LIST
+            
+            project_info = ProjectResponse(
+                id=UUID4(project_data['id']),
+                name=project_data['name'],
+                org_id=UUID4(project_data['org_id']),
+                avatar_color=project_data.get('avatar_color'),
+                avatar_icon=project_data.get('avatar_icon'),
+                avatar_url=avatar_url,
+                start_date=project_data['start_date'],
+                end_date=project_data.get('end_date'),
+                view=view,
+                progress_percentage=project_data.get('progress_percentage', 0),
+                members=[]  # Will be populated below
+            )
+            
+            # 1. Get project members with user info (handle duplicates)
             members_response = supabase.table('project_members').select(
                 'user_id'
             ).eq('project_id', project_id_str).execute()
             
             members = []
+            seen_user_ids = set()
             if members_response.data:
                 user_ids = [UUID4(member['user_id']) for member in members_response.data]
                 for user_id in user_ids:
+                    user_id_str = str(user_id)
+                    # Skip duplicates
+                    if user_id_str in seen_user_ids:
+                        continue
+                    seen_user_ids.add(user_id_str)
+                    
                     user_info = self._get_user_info_with_cache(user_id)
                     members.append(ProjectMemberSummary(
                         id=user_id,
                         display_name=user_info.get('display_name'),
                         avatar_url=user_info.get('avatar_url')
                     ))
+            
+            # Update project_info with members
+            project_info.members = members
             
             # 2. Get top 5 latest project attachments
             attachment_service = AttachmentService(self.files_service)
@@ -702,6 +782,7 @@ class ProjectService:
             
             # Build response
             summary = ProjectSummaryResponse(
+                project=project_info,
                 members=members,
                 latest_attachments=latest_attachments,
                 latest_links=latest_links,
