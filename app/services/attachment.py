@@ -11,6 +11,7 @@ from app.schemas.attachments import (
 )
 from app.services.files import FilesService
 from app.utils import apply_pagination, calculate_file_size
+from app.utils.redis_cache import ProjectSummaryCache
 
 class AttachmentService:
     def __init__(self, files_service: FilesService):
@@ -49,6 +50,10 @@ class AttachmentService:
 
         # get file info
         file_info = self.files_service.get_file(file_id)
+        
+        # Invalidate project summary cache for project attachments
+        if entity_type == AttachmentType.PROJECT:
+            ProjectSummaryCache.delete_summary(str(entity_id))
         
         return AttachmentResponse(
             id=response.data[0]['id'],
@@ -128,6 +133,15 @@ class AttachmentService:
         """
         Delete an attachment. Optimized single query operation.
         """
+        # Get attachment info before deleting
+        attachment_data = None
+        try:
+            attachment_response = supabase.table('attachments').select('entity_id, entity_type').eq('id', str(attachment_id)).execute()
+            if attachment_response.data and len(attachment_response.data) > 0:
+                attachment_data = attachment_response.data[0]
+        except Exception:
+            pass
+        
         try:
             response = supabase.table('attachments').delete().eq('id', str(attachment_id)).execute()
         except Exception as e:
@@ -141,6 +155,10 @@ class AttachmentService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Attachment not found"
             )
+        
+        # Invalidate project summary cache for project attachments
+        if attachment_data and attachment_data.get('entity_type') == AttachmentType.PROJECT.value:
+            ProjectSummaryCache.delete_summary(attachment_data['entity_id'])
         
         return True
 
@@ -156,4 +174,9 @@ class AttachmentService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete all attachments: {e}"
             )
+        
+        # Invalidate project summary cache for project attachments
+        if entity_type == AttachmentType.PROJECT:
+            ProjectSummaryCache.delete_summary(str(entity_id))
+        
         return True

@@ -12,6 +12,7 @@ from app.schemas.activities import (
 from app.services.files import FilesService
 from app.core import supabase
 from app.utils import calculate_time_ago, apply_pagination
+from app.utils.redis_cache import ProjectSummaryCache
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,21 @@ class ActivityService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to add activity: {str(e)}"
             )
+        
+        # Invalidate project summary cache for activities
+        if activity_type == ActivityType.PROJECT:
+            # Project activity - invalidate cache for the project
+            ProjectSummaryCache.delete_summary(str(entity_id))
+        elif activity_type == ActivityType.TASK:
+            # Task activity - get project_id from task and invalidate cache
+            try:
+                task_response = supabase.table('tasks').select('project_id').eq('id', str(entity_id)).execute()
+                if task_response.data and len(task_response.data) > 0:
+                    project_id = task_response.data[0].get('project_id')
+                    if project_id:
+                        ProjectSummaryCache.delete_summary(str(project_id))
+            except Exception as e:
+                logger.warning(f"Failed to get project_id for task activity: {str(e)}")
         
         return
 

@@ -40,6 +40,7 @@ from app.services.attachment import AttachmentService
 from app.services.activity import ActivityService, ActivityType
 from app.services.link import LinkService, LinkEntityType
 from app.utils import calculate_time_ago, apply_pagination, calculate_file_size
+from app.utils.redis_cache import ProjectSummaryCache
 from app.utils.inbox_helpers import (
     trigger_task_assigned_notification,
     trigger_task_unassigned_notification,
@@ -110,6 +111,9 @@ class TaskService:
         except Exception as e:
             # Don't fail task creation if activity recording fails, but log the error
             logger.error(f"Failed to record task creation activity: {str(e)}", exc_info=True)
+        
+        # Invalidate project summary cache
+        ProjectSummaryCache.delete_summary(str(task_request.project_id))
             
         return TaskCreateResponse(
             id=response.data[0]['id'],
@@ -487,6 +491,11 @@ class TaskService:
             # Don't fail assignee change if activity recording fails, but log the error
             logger.error(f"Failed to record assignee change activity: {str(e)}", exc_info=True)
         
+        # Invalidate project summary cache (affects team workload)
+        project_id = response.data[0].get('project_id')
+        if project_id:
+            ProjectSummaryCache.delete_summary(str(project_id))
+        
         assignee = None
         if response.data[0].get('assignee_id'):
             assignee = self._get_user_info(response.data[0]['assignee_id'])
@@ -584,6 +593,11 @@ class TaskService:
             except Exception as e:
                 # Don't fail task update if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
+        
+        # Invalidate project summary cache
+        project_id = response.data[0].get('project_id')
+        if project_id:
+            ProjectSummaryCache.delete_summary(str(project_id))
         
         return TaskUpdateResponse(
             id=response.data[0]['id'],
@@ -684,6 +698,11 @@ class TaskService:
                 # Don't fail status change if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
         
+        # Invalidate project summary cache
+        project_id = response.data[0].get('project_id')
+        if project_id:
+            ProjectSummaryCache.delete_summary(str(project_id))
+        
         assignee = None
         if response.data[0].get('assignee_id'):
             assignee = self._get_user_info(response.data[0]['assignee_id'])
@@ -738,6 +757,11 @@ class TaskService:
                 detail="Task not found"
             )
         
+        # Invalidate project summary cache
+        project_id = response.data[0].get('project_id')
+        if project_id:
+            ProjectSummaryCache.delete_summary(str(project_id))
+        
         assignee = None
         if response.data[0].get('assignee_id'):
             assignee = self._get_user_info(response.data[0]['assignee_id'])
@@ -756,6 +780,15 @@ class TaskService:
         task_id: UUID4,
         user_id: UUID4,
     ) -> bool:
+        # Get project_id before deleting
+        project_id = None
+        try:
+            task_response = supabase.table('tasks').select('project_id').eq('id', str(task_id)).execute()
+            if task_response.data and len(task_response.data) > 0:
+                project_id = task_response.data[0].get('project_id')
+        except Exception:
+            pass
+        
         try:
             response = supabase.table('tasks').delete().eq('id', task_id).eq('created_by', user_id).execute()
         except AuthApiError as e:
@@ -769,6 +802,10 @@ class TaskService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Failed to delete task"
             )
+        
+        # Invalidate project summary cache
+        if project_id:
+            ProjectSummaryCache.delete_summary(str(project_id))
         
         return True
     

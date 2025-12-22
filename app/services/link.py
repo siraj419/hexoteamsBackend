@@ -12,6 +12,7 @@ from app.schemas.links import (
 )
 from app.core import supabase
 from app.utils import calculate_time_ago, apply_pagination
+from app.utils.redis_cache import ProjectSummaryCache
 
 class LinkService:
     def __init__(self, user_timezone: str = 'utc'):
@@ -37,6 +38,9 @@ class LinkService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create link: {e}"
             )
+        
+        if entity_type == LinkEntityType.PROJECT:
+            ProjectSummaryCache.delete_summary(str(entity_id))
         
         return LinkResponse(
             id=response.data[0]['id'],
@@ -92,6 +96,16 @@ class LinkService:
         """
         Update a link. Optimized to fetch updated data in single query.
         """
+        link_id_str = str(link_id)
+        
+        link_data = None
+        try:
+            link_response = supabase.table('links').select('entity_id, entity_type').eq('id', link_id_str).execute()
+            if link_response.data and len(link_response.data) > 0:
+                link_data = link_response.data[0]
+        except Exception as e:
+            pass
+        
         updates = {}
         if link_request.title is not None:
             updates['title'] = link_request.title
@@ -105,7 +119,7 @@ class LinkService:
             )
                 
         try:
-            response = supabase.table('links').update(updates).eq('id', str(link_id)).execute()
+            response = supabase.table('links').update(updates).eq('id', link_id_str).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -117,6 +131,9 @@ class LinkService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Link not found"
             )
+        
+        if link_data and link_data.get('entity_type') == LinkEntityType.PROJECT.value:
+            ProjectSummaryCache.delete_summary(link_data['entity_id'])
         
         return LinkResponse(
             id=response.data[0]['id'],
@@ -132,8 +149,18 @@ class LinkService:
         """
         Delete a link. Optimized single query operation.
         """
+        link_id_str = str(link_id)
+        
+        link_data = None
         try:
-            response = supabase.table('links').delete().eq('id', str(link_id)).execute()
+            link_response = supabase.table('links').select('entity_id, entity_type').eq('id', link_id_str).execute()
+            if link_response.data and len(link_response.data) > 0:
+                link_data = link_response.data[0]
+        except Exception as e:
+            pass
+        
+        try:
+            response = supabase.table('links').delete().eq('id', link_id_str).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -145,6 +172,9 @@ class LinkService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Link not found"
             )
+        
+        if link_data and link_data.get('entity_type') == LinkEntityType.PROJECT.value:
+            ProjectSummaryCache.delete_summary(link_data['entity_id'])
         
         return True
 
@@ -160,5 +190,8 @@ class LinkService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete all links: {e}"
             )
+        
+        if entity_type == LinkEntityType.PROJECT:
+            ProjectSummaryCache.delete_summary(str(entity_id))
             
         return True
