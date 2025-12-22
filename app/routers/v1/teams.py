@@ -13,6 +13,7 @@ from app.schemas.teams import (
     PaginatedTeamInvitationsResponse,
     PaginatedTeamMembersResponse,
 )
+from app.schemas.organizations import OrganizationMemberRole
 from app.services.team import TeamService
 
 router = APIRouter()
@@ -26,6 +27,10 @@ def invite_user(
     """
     Invite users to an organization and optionally add them to projects.
     
+    Permission rules:
+    - Owners can invite users with any role (admin or member)
+    - Admins can only invite users as members (not as admin)
+    
     Case 1: User already belongs to organization
     - Adds user to specified project(s)
     - Sends informational email
@@ -35,11 +40,20 @@ def invite_user(
     - Creates invitation record with secure token
     - Sends invitation email with accept link
     """
+    inviter_role = active_organization.get('member_role')
+    
+    if inviter_role == OrganizationMemberRole.ADMIN.value and team_request.add_as_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins can only invite users as members. Only owners can invite users as admins."
+        )
+    
     team_service = TeamService()
     team_service.invite_user(
         active_organization['id'], 
         active_organization['member_user_id'],
-        team_request
+        team_request,
+        inviter_role
     )
     return None
 

@@ -38,9 +38,14 @@ class TeamService:
         org_id: UUID4,
         invited_by: UUID4,
         invite_request: TeamInviteRequest,
+        inviter_role: str,
     ) -> None:
         """
         Invite users to an organization and optionally add them to projects.
+        
+        Permission rules:
+        - Owners can invite users with any role (admin or member)
+        - Admins can only invite users as members (not as admin)
         
         Case 1: User already belongs to organization
         - Add user to specified project(s)
@@ -57,11 +62,11 @@ class TeamService:
                 detail="At least one email is required"
             )
         
-        # if not invite_request.project_ids:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_400_BAD_REQUEST,
-        #         detail="At least one project ID is required"
-        #     )
+        if inviter_role == OrganizationMemberRole.ADMIN.value and invite_request.add_as_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admins can only invite users as members. Only owners can invite users as admins."
+            )
         
         # Verify projects belong to organization
         self._verify_projects_belong_to_org(org_id, invite_request.project_ids)
