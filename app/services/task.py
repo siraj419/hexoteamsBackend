@@ -58,6 +58,7 @@ class TaskService:
         self,
         task_request: TaskCreateRequest,
         user_id: UUID4,
+        project_id: UUID4,
         parent_id: Optional[UUID4] = None,
     ) -> TaskCreateResponse:
         
@@ -77,7 +78,7 @@ class TaskService:
                 'due_date': task_request.due_date,
                 'assignee_id': task_request.assignee_id,
                 'parent_id': str(parent_id) if parent_id else None,
-                'project_id': str(task_request.project_id),
+                'project_id': str(project_id),
                 'created_by': str(user_id),
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
@@ -113,7 +114,7 @@ class TaskService:
             logger.error(f"Failed to record task creation activity: {str(e)}", exc_info=True)
         
         # Invalidate project summary cache
-        ProjectSummaryCache.delete_summary(str(task_request.project_id))
+        ProjectSummaryCache.delete_summary(str(project_id))
             
         return TaskCreateResponse(
             id=response.data[0]['id'],

@@ -17,9 +17,9 @@ class TaskStatus(Enum):
 
 
 class TaskRequest(BaseModel):
-    project_id: UUID4
+    pass
 
-class TaskCreateRequest(TaskRequest):
+class TaskCreateRequest(BaseModel):
     title: str
     content: Optional[str] = None
     status: TaskStatus
@@ -51,13 +51,13 @@ class TaskUpdateRequest(BaseModel):
     due_date: Optional[datetime] = None
     assignee_id: Optional[UUID4] = None
 
-class TaskChangeAssigneeRequest(TaskRequest):
+class TaskChangeAssigneeRequest(BaseModel):
     assignee_id: Optional[UUID4] = None
 
-class TaskChangeStatusRequest(TaskRequest):
+class TaskChangeStatusRequest(BaseModel):
     status: TaskStatus
 
-class TaskUpdateDetailsRequest(TaskRequest):
+class TaskUpdateDetailsRequest(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     due_date: Optional[datetime] = None
@@ -94,11 +94,11 @@ class TaskCommentResponse(BaseModel):
     parent_id: Optional[UUID4] = None
     content: str
 
-class TaskCommentCreateRequest(TaskRequest):
+class TaskCommentCreateRequest(BaseModel):
     content: str
     file_ids: Optional[List[UUID4]] = []
 
-class TaskCommentUpdateRequest(TaskRequest):
+class TaskCommentUpdateRequest(BaseModel):
     content: Optional[str] = None
     file_ids: Optional[List[UUID4]] = []
 
@@ -149,11 +149,11 @@ class TaskResponse(BaseModel):
     due_date: Optional[datetime] = None
     assignee: Optional[TaskUserInfoResponse] = None
     
-class TaskLinkRequest(TaskRequest, LinkRequest):
+class TaskLinkRequest(LinkRequest):
     pass
 
-class TaskCreateAttachmentRequest(TaskRequest):
+class TaskCreateAttachmentRequest(BaseModel):
     file_id: UUID4
 
-class TaskLinkUpdateRequest(TaskRequest, LinkUpdateRequest):
+class TaskLinkUpdateRequest(LinkUpdateRequest):
     pass

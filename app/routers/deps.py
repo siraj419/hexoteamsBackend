@@ -1,11 +1,10 @@
-from fastapi import Request, HTTPException, status, Depends
+from fastapi import Request, HTTPException, status, Depends, Query
 from supabase_auth.errors import AuthApiError
 from pydantic import UUID4
 from typing import Any
 
 from app.core import supabase
 from app.schemas.organizations import OrganizationMemberRole
-from app.schemas.tasks import TaskRequest
 
 def get_current_user(request: Request) -> any:
     
@@ -105,9 +104,9 @@ def get_organization_admin_or_owner(user: any= Depends(get_current_user)) -> any
     
     return organization
 
-def get_project_member(task_request : TaskRequest, user: any= Depends(get_current_user)):
+def get_project_member(project_id: UUID4 = Query(...), user: any= Depends(get_current_user)):
     try:
-        response = supabase.table('project_members').select('*').eq('project_id', task_request.project_id).eq('user_id', user.id).execute()
+        response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
     except AuthApiError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -120,7 +119,10 @@ def get_project_member(task_request : TaskRequest, user: any= Depends(get_curren
             detail="User is not a member of this project"
         )
     
-    return response.data[0]
+    member_data = response.data[0]
+    member_data['project_id'] = project_id
+    member_data['user_id'] = user.id
+    return member_data
 
 
 def get_project_member_with_chat_access(project_id: UUID4, user: any = Depends(get_current_user)) -> dict:

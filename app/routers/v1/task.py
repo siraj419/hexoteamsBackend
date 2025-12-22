@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Any, List, Optional
 from pydantic import UUID4
 
@@ -53,31 +53,34 @@ router = APIRouter()
 @router.post('/', response_model=TaskCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_task(
     task_request: TaskCreateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
     Create a new task for a project
     """
     task_service = TaskService()
-    return task_service.create_task(task_request, member['user_id'])
+    return task_service.create_task(task_request, member['user_id'], project_id=project_id)
 
 @router.post('/{task_id}/subtasks', response_model=TaskCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_subtask(
     task_id: UUID4,
     task_request: TaskCreateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
     Create a new subtask for a task
     """
     task_service = TaskService()
-    return task_service.create_task(task_request, member['user_id'], parent_id=task_id)
+    return task_service.create_task(task_request, member['user_id'], parent_id=task_id, project_id=project_id)
 
 
 @router.post('/{task_id}/comments', response_model=TaskCommentCreateResponse, status_code=status.HTTP_201_CREATED)
 def add_task_comment(
     task_id: UUID4,
     task_request: TaskCommentCreateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -91,6 +94,7 @@ def reply_to_task_comment(
     task_id: UUID4,
     comment_id: UUID4,
     task_request: TaskCommentCreateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -103,6 +107,7 @@ def reply_to_task_comment(
 def update_task_comment(
     comment_id: UUID4,
     task_request: TaskCommentUpdateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -114,7 +119,7 @@ def update_task_comment(
 @router.delete('/comments/{comment_id}', status_code=status.HTTP_204_NO_CONTENT)
 def delete_task_comment(
     comment_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -128,6 +133,7 @@ def delete_task_comment(
 def add_task_link(
     task_id: UUID4,
     task_request: TaskLinkRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -141,7 +147,7 @@ def add_task_link(
 @router.get('/{task_id}/links', response_model=LinkGetPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_task_links(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
     limit: Optional[int] = None,
     offset: Optional[int] = None,
@@ -160,6 +166,7 @@ def update_task_link(
     task_id: UUID4,
     link_id: UUID4,
     task_request: TaskLinkUpdateRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -174,7 +181,7 @@ def update_task_link(
 @router.delete('/{task_id}/links/{link_id}', status_code=status.HTTP_204_NO_CONTENT)
 def delete_task_link(
     link_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -189,6 +196,7 @@ def delete_task_link(
 def add_task_attachment(
     task_id: UUID4,
     task_request: TaskCreateAttachmentRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -201,7 +209,7 @@ def add_task_attachment(
 @router.get('/{task_id}/attachments', response_model=AttachmentGetPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_task_attachments(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
     limit: Optional[int] = None,
     offset: Optional[int] = None,
@@ -216,7 +224,7 @@ def get_task_attachments(
 @router.delete('/attachments/{attachment_id}', status_code=status.HTTP_204_NO_CONTENT)
 def delete_task_attachment(
     attachment_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -230,7 +238,7 @@ def delete_task_attachment(
 @router.get('/{task_id}/get', response_model=TaskGetResponse, status_code=status.HTTP_200_OK)
 def get_task(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -242,7 +250,7 @@ def get_task(
 @router.get('/{task_id}/assignee', response_model=TaskUserInfoResponse, status_code=status.HTTP_200_OK)
 def get_task_assignee(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -263,6 +271,7 @@ def get_task_assignee(
 def change_task_assignee(
     task_id: UUID4,
     task_request: TaskChangeAssigneeRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -281,6 +290,7 @@ def change_task_assignee(
 def change_task_status(
     task_id: UUID4,
     task_request: TaskChangeStatusRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -295,6 +305,7 @@ def change_task_status(
 def update_task_details(
     task_id: UUID4,
     task_request: TaskUpdateDetailsRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
 ):
     """
@@ -308,7 +319,7 @@ def update_task_details(
 @router.get('/{task_id}/activities', response_model=ActivityGetPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_task_activities(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
     limit: Optional[int] = None,
     offset: Optional[int] = None,
@@ -329,7 +340,7 @@ def get_task_activities(
 @router.get('/{task_id}/comments', response_model=TaskGetCommentsPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_task_comments(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
     limit: Optional[int] = None,
     offset: Optional[int] = None,
@@ -345,7 +356,7 @@ def get_task_comments(
 
 @router.get('/', response_model=List[TaskResponse], status_code=status.HTTP_200_OK)
 def list_tasks(
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     created_by: Optional[UUID4] = None,
     member: Any = Depends(get_project_member),
     search: Optional[str] = None,
@@ -359,7 +370,7 @@ def list_tasks(
     """
     task_service = TaskService()
     return task_service.list_tasks(
-        task_request.project_id,
+        project_id,
         user_id=created_by,
         search=search,
         assignee_id=assignee_id,
@@ -371,7 +382,7 @@ def list_tasks(
 @router.get('/{task_id}/subtasks', response_model=List[TaskResponse], status_code=status.HTTP_200_OK)
 def list_subtasks(
     task_id: UUID4,
-    task_request: TaskRequest,
+    project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
     search: Optional[str] = None,
     assignee_id: Optional[UUID4] = None,
