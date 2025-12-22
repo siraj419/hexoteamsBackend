@@ -7,7 +7,7 @@ import os
 import logging
 
 from app.core import supabase
-from app.core.s3 import s3_service
+from app.core.s3 import s3_service, S3ServiceException
 from fastapi import UploadFile
 
 logger = logging.getLogger(__name__)
@@ -41,16 +41,22 @@ class FilesService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File size exceeds the maximum allowed size")
             
         # store the file in the database
-        response = supabase.table("files").insert({
-            "name": file.filename,
-            "size_bytes": file.size,
-            "content_type": file.content_type,
-            "uploaded_by": str(user_id),
-            "org_id": str(org_id) if org_id else None,
-            "project_id": str(project_id) if project_id else None,
-            "task_id": str(task_id) if task_id else None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        try:
+            response = supabase.table("files").insert({
+                "name": file.filename,
+                "size_bytes": file.size,
+                "content_type": file.content_type,
+                "uploaded_by": str(user_id),
+                "org_id": str(org_id) if org_id else None,
+                "project_id": str(project_id) if project_id else None,
+                "task_id": str(task_id) if task_id else None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create file record in database: {e}"
+            )
         
         # Extract file extension from original filename
         file_extension = os.path.splitext(file.filename)[1]  # Gets extension with dot (e.g., '.jpg')
@@ -59,13 +65,28 @@ class FilesService:
         
         # reset file pointer to beginning (in case validations read it)
         file.file.seek(0)
-                
+        
         # upload the file to S3 with extension
-        self.s3_service.upload_file(
-            file=file.file,
-            key=s3_key,
-            content_type=file.content_type
-        )
+        try:
+            self.s3_service.upload_file(
+                file=file.file,
+                key=s3_key,
+                content_type=file.content_type
+            )
+        except (S3ServiceException, Exception) as e:
+            # If upload fails, delete the database record that was inserted
+            try:
+                supabase.table("files").delete().eq("id", file_id).execute()
+                logger.warning(f"Deleted file record {file_id} after failed S3 upload: {str(e)}")
+            except Exception as delete_err:
+                logger.error(f"Failed to delete file record {file_id} after upload failure: {str(delete_err)}")
+            
+            # Return 500 error instead of raising exception
+            logger.error(f"Failed to upload file to S3/MinIO: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to upload file to storage. Please try again later."
+            )
         
         # get user profile
         try:
@@ -126,10 +147,11 @@ class FilesService:
                 key=s3_key,
                 content_type=file.content_type
             )
-        except Exception as e:
+        except (S3ServiceException, Exception) as e:
+            logger.error(f"Failed to upload file to S3/MinIO: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to upload file to s3: {e}"
+                detail="Failed to upload file to storage. Please try again later."
             )
         
         return response.data[0]
@@ -172,10 +194,11 @@ class FilesService:
         # delete the file from s3
         try:
             self.s3_service.delete_file(s3_key)
-        except Exception as e:
+        except (S3ServiceException, Exception) as e:
+            logger.error(f"Failed to delete file from S3/MinIO: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete file from s3: {e}"
+                detail="Failed to delete file from storage. Please try again later."
             )
         
         # delete the file record from the database
@@ -324,7 +347,14 @@ class FilesService:
         s3_key = f"{str(file_id)}{file_extension}"
         
         # Generate presigned URL with the correct S3 key
-        file_url = self.s3_service.generate_presigned_url(s3_key)
+        try:
+            file_url = self.s3_service.generate_presigned_url(s3_key)
+        except (S3ServiceException, Exception) as e:
+            logger.error(f"Failed to generate presigned URL from S3/MinIO: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate file URL. Please try again later."
+            )
         
         return file_url
     
@@ -348,10 +378,11 @@ class FilesService:
         files_keys = [f"{file.id}{os.path.splitext(file.name)[1]}" for file in files]
         try:
             self.s3_service.delete_files(files_keys)
-        except Exception as e:
+        except (S3ServiceException, Exception) as e:
+            logger.error(f"Failed to delete files from S3/MinIO: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete files from s3: {e}"
+                detail="Failed to delete files from storage. Please try again later."
             )
         
         # delete the files from the database
@@ -372,10 +403,11 @@ class FilesService:
         files_keys = [f"{file.id}{os.path.splitext(file.name)[1]}" for file in files]
         try:
             self.s3_service.delete_files(files_keys)
-        except Exception as e:
+        except (S3ServiceException, Exception) as e:
+            logger.error(f"Failed to delete files from S3/MinIO: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete files from s3: {e}"
+                detail="Failed to delete files from storage. Please try again later."
             )
         
         # delete the files from the database
@@ -412,7 +444,10 @@ class FilesService:
         
         avatar_url = None
         if response.data[0]['avatar_file_id']:
-            avatar_url = self.get_file_url(response.data[0]['avatar_file_id'])
+            try:
+                avatar_url = self.get_file_url(response.data[0]['avatar_file_id'])
+            except HTTPException:
+                pass
         
         
         return FileUploadedByUserGetResponse(
@@ -482,10 +517,11 @@ class FilesService:
                     key=s3_key,
                     content_type=content_type
                 )
-            except Exception as e:
+            except (S3ServiceException, Exception) as e:
+                logger.error(f"Failed to upload chat attachment to S3/MinIO: {str(e)}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to upload file to S3: {str(e)}"
+                    detail="Failed to upload file to storage. Please try again later."
                 )
             
             thumbnail_path = None
@@ -569,10 +605,17 @@ class FilesService:
             
             self._verify_attachment_access(attachment, user_id)
             
-            download_url = self.s3_service.generate_presigned_url(
-                attachment['storage_path'],
-                expiration=900
-            )
+            try:
+                download_url = self.s3_service.generate_presigned_url(
+                    attachment['storage_path'],
+                    expiration=900
+                )
+            except (S3ServiceException, Exception) as e:
+                logger.error(f"Failed to generate presigned URL from S3/MinIO: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to generate download URL. Please try again later."
+                )
             
             return {
                 'download_url': download_url,
@@ -582,9 +625,10 @@ class FilesService:
         except HTTPException:
             raise
         except Exception as e:
+            logger.error(f"Failed to get download URL: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get download URL: {str(e)}"
+                detail="Failed to get download URL. Please try again later."
             )
     
     def delete_chat_attachment(self, attachment_id: UUID4, user_id: UUID4) -> bool:
@@ -619,13 +663,15 @@ class FilesService:
             
             try:
                 self.s3_service.delete_file(attachment['storage_path'])
-            except:
+            except (S3ServiceException, Exception) as e:
+                logger.warning(f"Failed to delete attachment file from S3/MinIO: {str(e)}")
                 pass
             
             if attachment.get('thumbnail_path'):
                 try:
                     self.s3_service.delete_file(attachment['thumbnail_path'])
-                except:
+                except (S3ServiceException, Exception) as e:
+                    logger.warning(f"Failed to delete thumbnail from S3/MinIO: {str(e)}")
                     pass
             
             supabase.table('chat_attachments').delete().eq('id', str(attachment_id)).execute()
@@ -679,11 +725,15 @@ class FilesService:
             
             thumb_key = f"chat-attachments/thumbnails/{attachment_id}_thumb.jpg"
             
-            self.s3_service.upload_file(
-                file=thumb_buffer,
-                key=thumb_key,
-                content_type='image/jpeg'
-            )
+            try:
+                self.s3_service.upload_file(
+                    file=thumb_buffer,
+                    key=thumb_key,
+                    content_type='image/jpeg'
+                )
+            except (S3ServiceException, Exception) as e:
+                logger.warning(f"Failed to upload thumbnail to S3/MinIO: {str(e)}")
+                return None
             
             print(thumb_key)
             
