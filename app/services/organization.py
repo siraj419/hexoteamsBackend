@@ -298,7 +298,7 @@ class OrganizationService:
             return OrganizationGetResponse(**cached_org)
         
         try:
-            response = supabase.table('organization_members').select('organizations(*)').eq('user_id', user_id_str).eq('active', True).execute()
+            response = supabase.table('organization_members').select('organizations(*), role').eq('user_id', user_id_str).eq('active', True).execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -315,6 +315,8 @@ class OrganizationService:
         if response.data[0]['organizations']['avatar_file_id']:
             avatar_url = self.files_service.get_file_url(response.data[0]['organizations']['avatar_file_id'])
         
+        member_role = OrganizationMemberRole(response.data[0]['role']) if response.data[0].get('role') else None
+        
         org_response = OrganizationGetResponse(
             id=response.data[0]['organizations']['id'],
             name=response.data[0]['organizations']['name'],
@@ -322,6 +324,7 @@ class OrganizationService:
             avatar_color=response.data[0]['organizations']['avatar_color'],
             avatar_icon=response.data[0]['organizations']['avatar_icon'],
             avatar_url=avatar_url,
+            member_role=member_role,
         )
         
         ActiveOrganizationCache.set_organization(user_id_str, org_response.model_dump(mode='json'))

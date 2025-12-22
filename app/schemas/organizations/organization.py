@@ -35,6 +35,7 @@ class OrganizationResponse(BaseModel):
 
 class OrganizationGetResponse(OrganizationResponse):
     avatar_url: Optional[str] = Field(None, description="The URL of the organization's avatar")
+    member_role: Optional[OrganizationMemberRole] = Field(None, description="The role of the user in the organization")
 
 class OrganizationCreateResponse(OrganizationResponse):
     pass
