@@ -51,6 +51,7 @@ class ProjectResponse(BaseModel):
     view: Optional[ProjectTasksView] = ProjectTasksView.LIST
     progress_percentage: Optional[int] = 0
     members: List['ProjectMemberSummary'] = []
+    favourite_project: bool = False
 
 class AllProjectsResponse(BaseModel):
     member_projects: List[ProjectResponse]

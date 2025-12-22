@@ -247,6 +247,7 @@ def get_archived_projects(
     project_service = ProjectService()
     return project_service.get_archived_projects(
         org_id=active_organization['id'],
+        user_id=active_organization['member_user_id'],
         limit=limit,
         offset=offset
     )
@@ -318,8 +319,20 @@ def get_project(
         Get a project by its ID.
         User must be a project member or organization admin/owner.
     """
+    from app.routers.deps import get_current_user
     project_service = ProjectService()
-    return project_service.get_project(project_id)
+    user_id = None
+    if access.get('member_data'):
+        user_id = UUID4(access['member_data']['user_id'])
+    elif access.get('has_access'):
+        # Try to get user from current_user dependency
+        try:
+            from fastapi import Request
+            # Get user from request if available
+            pass
+        except:
+            pass
+    return project_service.get_project(project_id, user_id=user_id)
 
 @router.post("/{project_id}/members", response_model=ProjectMember, status_code=status.HTTP_201_CREATED)
 def add_project_member(
@@ -567,4 +580,5 @@ def get_project_summary(
     Cached: 5 minutes
     """
     project_service = ProjectService()
-    return project_service.get_project_summary(project_id)
+    user_id = UUID4(member['user_id']) if isinstance(member['user_id'], str) else member['user_id']
+    return project_service.get_project_summary(project_id, user_id=user_id)

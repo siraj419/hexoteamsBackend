@@ -263,6 +263,7 @@ class ProjectService:
             view=response.data[0]['view'],
             progress_percentage=response.data[0]['progress_percentage'],
             members=members,
+            favourite_project=self._is_favourite_project(project_id, user_id),
         )
         
     def get_projects(
@@ -335,6 +336,7 @@ class ProjectService:
                     view=project['view'],
                     progress_percentage=project['progress_percentage'],
                     members=members,
+                    favourite_project=self._is_favourite_project(project_id, user_id),
                 )
             )
         
@@ -357,6 +359,7 @@ class ProjectService:
     def get_archived_projects(
         self,
         org_id: UUID4,
+        user_id: Optional[UUID4] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> ArchivedProjectsResponse:
@@ -464,7 +467,8 @@ class ProjectService:
     
     def get_project(
         self,
-        project_id: UUID4
+        project_id: UUID4,
+        user_id: Optional[UUID4] = None,
     ) -> ProjectGetResponse:
         try:
             response = supabase.table('projects').select('*').eq('id', project_id).execute()
@@ -507,11 +511,13 @@ class ProjectService:
             view=view,
             progress_percentage=response.data[0].get('progress_percentage', 0),
             members=members,
+            favourite_project=self._is_favourite_project(project_id, user_id),
         )
     
     def get_project_summary(
         self,
-        project_id: UUID4
+        project_id: UUID4,
+        user_id: Optional[UUID4] = None,
     ) -> ProjectSummaryResponse:
         """
         Get comprehensive project summary with caching
@@ -555,7 +561,8 @@ class ProjectService:
                             end_date=project_data.get('end_date'),
                             view=view,
                             progress_percentage=project_data.get('progress_percentage', 0),
-                            members=cached_summary.get('members', [])
+                            members=cached_summary.get('members', []),
+                            favourite_project=self._is_favourite_project(UUID4(project_data['id']), user_id),
                         )
                         cached_summary['project'] = project_info.model_dump(mode='json')
                 
@@ -598,7 +605,8 @@ class ProjectService:
                 end_date=project_data.get('end_date'),
                 view=view,
                 progress_percentage=project_data.get('progress_percentage', 0),
-                members=[]  # Will be populated below
+                members=[],  # Will be populated below
+                favourite_project=self._is_favourite_project(project_id, user_id),
             )
             
             # 1. Get project members with user info (handle duplicates)
@@ -844,6 +852,26 @@ class ProjectService:
                 'avatar_url': None
             }
     
+    def _is_favourite_project(self, project_id: UUID4, user_id: Optional[UUID4]) -> bool:
+        """
+        Check if a project is a favourite for a user.
+        
+        Args:
+            project_id: The project ID to check
+            user_id: The user ID to check (None if not available)
+            
+        Returns:
+            bool: True if the project is a favourite, False otherwise
+        """
+        if not user_id:
+            return False
+        
+        try:
+            response = supabase.table('favourite_projects').select('id').eq('project_id', str(project_id)).eq('user_id', str(user_id)).execute()
+            return response.data and len(response.data) > 0
+        except Exception:
+            return False
+    
     def _get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
         """
         Get project members with user info using Redis caching.
@@ -926,6 +954,7 @@ class ProjectService:
         self,
         project_id: UUID4,
         project_request: ProjectUpdateRequest,
+        user_id: Optional[UUID4] = None,
     ) -> ProjectUpdateResponse:
         
         updates = {}
@@ -976,6 +1005,7 @@ class ProjectService:
             status=response.data[0]['status'],
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
+            favourite_project=self._is_favourite_project(project_id, user_id),
         )
     
     def update_project_optimized(
@@ -987,6 +1017,7 @@ class ProjectService:
         avatar_icon: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        user_id: Optional[UUID4] = None,
     ) -> ProjectUpdateResponse:
         """
         Optimized project update method.
@@ -1051,6 +1082,7 @@ class ProjectService:
             status=updated_project.get('status'),
             created_at=updated_project['created_at'],
             updated_at=updated_project['updated_at'],
+            favourite_project=self._is_favourite_project(project_id, user_id),
         )
         
     def join_project(
@@ -1227,6 +1259,7 @@ class ProjectService:
                 view=project['projects']['view'],
                 progress_percentage=project['projects']['progress_percentage'],
                 members=members,
+                favourite_project=True,  # These are already favourite projects
             ))
         
         return projects
