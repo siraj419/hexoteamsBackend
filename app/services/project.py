@@ -873,8 +873,12 @@ class ProjectService:
         
         try:
             response = supabase.table('favourite_projects').select('id').eq('project_id', str(project_id)).eq('user_id', str(user_id)).execute()
-            return response.data and len(response.data) > 0
-        except Exception:
+            # Ensure we always return a boolean, not a list
+            if response.data and isinstance(response.data, list) and len(response.data) > 0:
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Error checking favourite project: {e}")
             return False
     
     def _get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
