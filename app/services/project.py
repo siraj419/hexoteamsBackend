@@ -337,7 +337,7 @@ class ProjectService:
                     view=project['view'],
                     progress_percentage=project['progress_percentage'],
                     members=members,
-                    favourite_project=False,  # Not included in get_projects response
+                    favourite_project=self._is_favourite_project(project_id, user_id),
                 )
             )
         
