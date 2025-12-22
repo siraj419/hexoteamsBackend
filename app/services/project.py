@@ -890,8 +890,21 @@ class ProjectService:
                 detail="Project is not archived, cannot delete unarchived projects"
             )
         
-        # delete the project files
-        self.files_service.delete_permanently_all_files_by_project_id(project_id)
+        # Delete project attachments from database only (not from S3)
+        from app.services.attachment import AttachmentService, AttachmentType
+        attachment_service = AttachmentService(self.files_service)
+        try:
+            attachment_service.delete_all(project_id, AttachmentType.PROJECT)
+        except Exception as e:
+            logger.warning(f"Failed to delete project attachments: {e}")
+            # Continue with project deletion even if attachment deletion fails
+        
+        # Delete project file records from database only (not from S3)
+        try:
+            self.files_service.delete_permanently_all_files_by_project_id(project_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete project files: {e}")
+            # Continue with project deletion even if file deletion fails
         
         try:
             response = supabase.table('projects').delete().eq('id', project_id).execute()

@@ -397,20 +397,10 @@ class FilesService:
         return True
     
     def delete_permanently_all_files_by_project_id(self, project_id: UUID4) -> bool:
-        
-        # delete the files from s3 (construct keys with extensions)
-        files, _ = self.get_files(project_id=project_id)
-        files_keys = [f"{file.id}{os.path.splitext(file.name)[1]}" for file in files]
-        try:
-            self.s3_service.delete_files(files_keys)
-        except (S3ServiceException, Exception) as e:
-            logger.error(f"Failed to delete files from S3/MinIO: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete files from storage. Please try again later."
-            )
-        
-        # delete the files from the database
+        """
+        Delete all file records associated with a project from the database.
+        Note: This does NOT delete files from S3/MinIO storage.
+        """
         try:
             supabase.table("files").delete().eq("project_id", str(project_id)).execute()
         except Exception as e:
