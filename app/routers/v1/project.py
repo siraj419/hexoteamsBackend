@@ -22,6 +22,7 @@ from app.schemas.projects import (
     ArchivedProjectsResponse,
     ProjectSummaryResponse,
     ProjectAddMemberRequest,
+    FavouriteProjectsResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
 
@@ -198,7 +199,7 @@ def get_projects(
     offset: Optional[int] = Query(None, ge=0)
 ):
     """
-        Get all projects in which the user is a member or and favourite projects
+        Get all projects in which the user is a member
     """
     project_service = ProjectService()
     return project_service.get_projects(
@@ -207,6 +208,22 @@ def get_projects(
         org_member_role=active_organization['member_role'],
         search=search,
         order_by=order_by,
+        limit=limit,
+        offset=offset
+    )
+
+@router.get("/favourites", response_model=FavouriteProjectsResponse, status_code=status.HTTP_200_OK)
+def get_favourite_projects(
+    active_organization: any = Depends(get_active_organization),
+    limit: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0)
+):
+    """
+        Get all favourite projects for the current user
+    """
+    project_service = ProjectService()
+    return project_service.get_favourite_projects(
+        user_id=active_organization['member_user_id'],
         limit=limit,
         offset=offset
     )

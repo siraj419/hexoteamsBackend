@@ -24,6 +24,7 @@ from app.schemas.projects import (
     TeamWorkload,
     UserWorkload,
     ProjectResponse,
+    FavouriteProjectsResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
 from app.services.files import FilesService
@@ -336,20 +337,15 @@ class ProjectService:
                     view=project['view'],
                     progress_percentage=project['progress_percentage'],
                     members=members,
-                    favourite_project=self._is_favourite_project(project_id, user_id),
+                    favourite_project=False,  # Not included in get_projects response
                 )
             )
-        
-        # get favourite projects
-        favourite_projects = self._get_favourite_projects(user_id)
-        # favourite_projects = []
         
         # get non-member projects count
         non_member_projects_count = self._get_non_member_projects_count(org_member_role, org_id, user_id)
         
         return AllProjectsResponse(
             member_projects=projects,
-            favourite_projects=favourite_projects,
             non_member_projects_count=non_member_projects_count,
             total=len(projects),
             offset=offset,
@@ -1226,12 +1222,19 @@ class ProjectService:
                 
         return limit, offset, query
     
-    def _get_favourite_projects(
+    def get_favourite_projects(
         self,
         user_id: UUID4,
-    ) -> List[ProjectGetResponse]:
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> FavouriteProjectsResponse:
         try:
-            response = supabase.table('favourite_projects').select('projects(*)', count='exact').eq('user_id', user_id).execute()
+            query = supabase.table('favourite_projects').select('projects(*)', count='exact').eq('user_id', str(user_id))
+            
+            # Apply pagination
+            limit, offset, query = self._apply_pagination(query, limit, offset)
+            
+            response = query.execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1242,7 +1245,7 @@ class ProjectService:
         for project in response.data:
             avatar_url = None
             if project['projects']['avatar_file_id']:
-                avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+                avatar_url = self.files_service.get_file_url(project['projects']['avatar_file_id'])
             
             project_id = UUID4(project['projects']['id'])
             members = self._get_project_members(project_id)
@@ -1262,7 +1265,14 @@ class ProjectService:
                 favourite_project=True,  # These are already favourite projects
             ))
         
-        return projects
+        total = response.count if hasattr(response, 'count') and response.count is not None else len(projects)
+        
+        return FavouriteProjectsResponse(
+            projects=projects,
+            total=total,
+            offset=offset,
+            limit=limit,
+        )
     
     def _get_non_member_projects_count(
         self,

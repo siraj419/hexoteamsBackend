@@ -23,6 +23,7 @@ from .projects import (
     UserWorkload,
     ProjectResponse,
     ProjectAddMemberRequest,
+    FavouriteProjectsResponse,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "UserWorkload",
     "ProjectResponse",
     "ProjectAddMemberRequest",
+    "FavouriteProjectsResponse",
 ]

@@ -55,8 +55,13 @@ class ProjectResponse(BaseModel):
 
 class AllProjectsResponse(BaseModel):
     member_projects: List[ProjectResponse]
-    favourite_projects: List[ProjectResponse]
     non_member_projects_count: int
+    total: int
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
+class FavouriteProjectsResponse(BaseModel):
+    projects: List[ProjectResponse]
     total: int
     offset: Optional[int] = None
     limit: Optional[int] = None
