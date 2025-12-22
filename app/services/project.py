@@ -1238,11 +1238,21 @@ class ProjectService:
     def get_favourite_projects(
         self,
         user_id: UUID4,
+        org_id: UUID4,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> FavouriteProjectsResponse:
         try:
-            query = supabase.table('favourite_projects').select('projects(*)', count='exact').eq('user_id', str(user_id))
+            # Query favourite projects and filter by organization
+            query = (
+                supabase.table('favourite_projects')
+                .select('projects(*)', count='exact')
+                .eq('user_id', str(user_id))
+            )
+            
+            # Filter projects by organization ID using the embedded projects relation
+            # We need to filter on the projects.org_id field
+            query = query.eq('projects.org_id', str(org_id))
             
             # Apply pagination
             limit, offset, query = self._apply_pagination(query, limit, offset)
@@ -1256,24 +1266,34 @@ class ProjectService:
         
         projects = []
         for project in response.data:
-            avatar_url = None
-            if project['projects']['avatar_file_id']:
-                avatar_url = self.files_service.get_file_url(project['projects']['avatar_file_id'])
+            # Skip if project doesn't exist or doesn't belong to the organization
+            if not project.get('projects'):
+                continue
+                
+            project_data = project['projects']
             
-            project_id = UUID4(project['projects']['id'])
+            # Double-check organization ID match (in case of query issues)
+            if str(project_data.get('org_id')) != str(org_id):
+                continue
+            
+            avatar_url = None
+            if project_data.get('avatar_file_id'):
+                avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
+            
+            project_id = UUID4(project_data['id'])
             members = self._get_project_members(project_id)
             
             projects.append(ProjectGetResponse(
                 id=project_id,
-                name=project['projects']['name'],
-                org_id=project['projects']['org_id'],
-                avatar_color=project['projects']['avatar_color'],
-                avatar_icon=project['projects']['avatar_icon'],
+                name=project_data['name'],
+                org_id=project_data['org_id'],
+                avatar_color=project_data.get('avatar_color'),
+                avatar_icon=project_data.get('avatar_icon'),
                 avatar_url=avatar_url,
-                start_date=project['projects']['start_date'],
-                end_date=project['projects']['end_date'],
-                view=project['projects']['view'],
-                progress_percentage=project['projects']['progress_percentage'],
+                start_date=project_data['start_date'],
+                end_date=project_data.get('end_date'),
+                view=project_data.get('view'),
+                progress_percentage=project_data.get('progress_percentage', 0),
                 members=members,
                 favourite_project=True,  # These are already favourite projects
             ))

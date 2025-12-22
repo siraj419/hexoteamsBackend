@@ -219,11 +219,12 @@ def get_favourite_projects(
     offset: Optional[int] = Query(None, ge=0)
 ):
     """
-        Get all favourite projects for the current user
+        Get all favourite projects for the current user in the active organization
     """
     project_service = ProjectService()
     return project_service.get_favourite_projects(
         user_id=active_organization['member_user_id'],
+        org_id=active_organization['id'],
         limit=limit,
         offset=offset
     )
