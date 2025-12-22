@@ -71,18 +71,27 @@ class TaskService:
                 )
         
         try:
-            response = supabase.table('tasks').insert({
+            insert_data = {
                 'title': task_request.title,
                 'content': task_request.content,
                 'status': task_request.status.value,
-                'due_date': task_request.due_date,
-                'assignee_id': task_request.assignee_id,
                 'parent_id': str(parent_id) if parent_id else None,
                 'project_id': str(project_id),
                 'created_by': str(user_id),
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
+            }
+            
+            if task_request.due_date:
+                if isinstance(task_request.due_date, datetime):
+                    insert_data['due_date'] = task_request.due_date.isoformat()
+                else:
+                    insert_data['due_date'] = task_request.due_date
+            
+            if task_request.assignee_id:
+                insert_data['assignee_id'] = str(task_request.assignee_id)
+            
+            response = supabase.table('tasks').insert(insert_data).execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
