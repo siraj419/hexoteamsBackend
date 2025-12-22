@@ -482,24 +482,31 @@ class ProjectService:
             )
             
         avatar_url = None
-        if response.data[0]['avatar_file_id']:
+        if response.data[0].get('avatar_file_id'):
             avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
         
         members = self._get_project_members(project_id)
         
+        view_value = response.data[0].get('view', ProjectTasksView.LIST.value)
+        if isinstance(view_value, str):
+            try:
+                view = ProjectTasksView(view_value)
+            except ValueError:
+                view = ProjectTasksView.LIST
+        else:
+            view = ProjectTasksView.LIST
+        
         return ProjectGetResponse(
-            id=response.data[0]['id'],
+            id=UUID4(response.data[0]['id']),
             name=response.data[0]['name'],
-            org_id=response.data[0]['org_id'],
-            avatar_color=response.data[0]['avatar_color'],
-            avatar_icon=response.data[0]['avatar_icon'],
+            org_id=UUID4(response.data[0]['org_id']),
+            avatar_color=response.data[0].get('avatar_color'),
+            avatar_icon=response.data[0].get('avatar_icon'),
             avatar_url=avatar_url,
             start_date=response.data[0]['start_date'],
-            end_date=response.data[0]['end_date'],
-            view=response.data[0]['view'],
-            status=response.data[0]['status'],
-            created_at=response.data[0]['created_at'],
-            updated_at=response.data[0]['updated_at'],
+            end_date=response.data[0].get('end_date'),
+            view=view,
+            progress_percentage=response.data[0].get('progress_percentage', 0),
             members=members,
         )
     
