@@ -20,7 +20,7 @@ class ProjectMemberRole(Enum):
 class ProjectOrderBy(Enum):
     ALPHABETICAL_ASC = "alphabetical_asc"
     ALPHABETICAL_DESC = "alphabetical_desc"
-    DATE_CREATED_DESC = "created_desc"
+    DATE_CREADESC = "created_desc"
     DATE_CREATED_ASC = "created_asc"
 
 
