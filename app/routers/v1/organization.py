@@ -81,7 +81,8 @@ def get_organization(
         Get a specific organization for the organization member
     """
     organization_service = OrganizationService()
-    return organization_service.get_organization(organization_id)
+    member_role = member.get('role') if member else None
+    return organization_service.get_organization(organization_id, member_role=member_role)
 
 @router.delete("/{organization_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_organization(

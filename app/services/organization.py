@@ -81,7 +81,7 @@ class OrganizationService:
         # Using PostgREST embedded resources to join with organizations table
         query = (
             supabase.table('organization_members')
-            .select('organizations(*)', count='exact')
+            .select('organizations(*), role', count='exact')
             .eq('user_id', str(user_id))
         )
         
@@ -106,6 +106,15 @@ class OrganizationService:
             avatar_url = None
             if organization.get('avatar_file_id'):
                 avatar_url = self.files_service.get_file_url(organization['avatar_file_id'])
+            
+            # Get member role from the member_record
+            member_role = None
+            if member_record.get('role'):
+                try:
+                    member_role = OrganizationMemberRole(member_record['role'])
+                except (ValueError, KeyError):
+                    member_role = None
+            
             organizations.append(
                 OrganizationGetResponse(
                     id=organization['id'],
@@ -114,6 +123,7 @@ class OrganizationService:
                     avatar_color=organization['avatar_color'],
                     avatar_icon=organization['avatar_icon'],
                     avatar_url=avatar_url,
+                    member_role=member_role,
                 )
             )
             
@@ -124,7 +134,7 @@ class OrganizationService:
             limit=limit,
         )
     
-    def get_organization(self, organization_id: UUID4) -> OrganizationGetResponse:
+    def get_organization(self, organization_id: UUID4, member_role: Optional[str] = None) -> OrganizationGetResponse:
         try:
             response = supabase.table('organizations').select('*').eq('id', str(organization_id)).execute()
         except AuthApiError as e:
@@ -143,6 +153,14 @@ class OrganizationService:
         if response.data[0]['avatar_file_id']:
             avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
         
+        # Convert member_role string to enum if provided
+        role_enum = None
+        if member_role:
+            try:
+                role_enum = OrganizationMemberRole(member_role)
+            except (ValueError, KeyError):
+                role_enum = None
+        
         return OrganizationGetResponse(
             id=response.data[0]['id'],
             name=response.data[0]['name'],
@@ -150,6 +168,7 @@ class OrganizationService:
             avatar_color=response.data[0]['avatar_color'],
             avatar_icon=response.data[0]['avatar_icon'],
             avatar_url=avatar_url,
+            member_role=role_enum,
         )
 
     def delete_organization(self, organization_id: UUID4) -> bool:
