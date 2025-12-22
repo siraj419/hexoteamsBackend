@@ -20,6 +20,7 @@ from .projects import (
     TaskSummary,
     TeamWorkload,
     UserWorkload,
+    ProjectResponse,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "TaskSummary",
     "TeamWorkload",
     "UserWorkload",
+    "ProjectResponse",
 ]
