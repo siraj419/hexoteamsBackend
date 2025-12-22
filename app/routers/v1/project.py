@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, Query, File, UploadFile, status, HTTPException
+from fastapi import APIRouter, Depends, Query, File, UploadFile, status, HTTPException, Form
 from pydantic import UUID4
 from typing import List, Optional
+from datetime import date
 
 router = APIRouter()
 
@@ -337,17 +338,80 @@ def add_project_member(
         role=member_request.role
     )
 
-# @router.put("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
-# def update_project(
-#     project_id: UUID4,
-#     project_request: ProjectUpdateRequest,
-#     user: any = Depends(get_organization_admin_or_owner),
-# ):
-#     """
-#         Update a project by its ID
-#     """
-#     project_service = ProjectService()
-#     return project_service.update_project(project_id, project_request)
+@router.patch("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
+def update_project_optimized(
+    project_id: UUID4,
+    name: Optional[str] = Form(None),
+    avatar: Optional[UploadFile] = File(None),
+    start_date: Optional[str] = Form(None),
+    end_date: Optional[str] = Form(None),
+    active_organization: any = Depends(get_active_organization),
+    project_member: any = Depends(get_project_owner_or_admin),
+):
+    """
+    Optimized endpoint to update project details.
+    
+    Updates:
+    - name: Project name
+    - avatar: Project avatar (file upload)
+    - start_date: Project start date (YYYY-MM-DD format)
+    - end_date: Project end date (YYYY-MM-DD format)
+    
+    Requires: Project owner/admin or organization admin/owner
+    Optimized: Single database query, efficient file handling, cache invalidation
+    """
+    # Check if user is org admin/owner (can update any project in org)
+    # or project owner/admin (can update their project)
+    is_org_admin_or_owner = (
+        active_organization['member_role'] == OrganizationMemberRole.ADMIN.value or
+        active_organization['member_role'] == OrganizationMemberRole.OWNER.value
+    )
+    
+    if not is_org_admin_or_owner and not project_member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only project owners/admins or organization admins/owners can update projects"
+        )
+    
+    # Validate that at least one field is being updated
+    if not any([name is not None, avatar is not None, start_date is not None, end_date is not None]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one field (name, avatar, start_date, end_date) must be provided"
+        )
+    
+    # Parse date strings
+    parsed_start_date = None
+    parsed_end_date = None
+    
+    if start_date:
+        try:
+            parsed_start_date = date.fromisoformat(start_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid start_date format. Use YYYY-MM-DD"
+            )
+    
+    if end_date:
+        try:
+            parsed_end_date = date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid end_date format. Use YYYY-MM-DD"
+            )
+    
+    project_service = ProjectService()
+    return project_service.update_project_optimized(
+        project_id=project_id,
+        name=name,
+        avatar_file=avatar,
+        start_date=parsed_start_date,
+        end_date=parsed_end_date,
+        user_id=active_organization['member_user_id'],
+        org_id=active_organization['id'],
+    )
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(

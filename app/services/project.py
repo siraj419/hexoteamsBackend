@@ -964,6 +964,134 @@ class ProjectService:
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
         )
+    
+    def update_project_optimized(
+        self,
+        project_id: UUID4,
+        name: Optional[str] = None,
+        avatar_file: Optional[UploadFile] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        user_id: UUID4 = None,
+        org_id: UUID4 = None,
+    ) -> ProjectUpdateResponse:
+        """
+        Optimized project update method.
+        Updates name, avatar (file upload), start_date, and end_date in a single operation.
+        """
+        
+        # First, get current project data in a single query
+        try:
+            project_response = supabase.table('projects').select('*').eq('id', str(project_id)).execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get project: {e}"
+            )
+        
+        if not project_response.data or len(project_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found"
+            )
+        
+        project_data = project_response.data[0]
+        current_avatar_file_id = project_data.get('avatar_file_id')
+        
+        # Handle avatar file upload if provided
+        avatar_file_id = current_avatar_file_id
+        if avatar_file:
+            # Validate file
+            if not self.files_service.validate_file_extension(avatar_file.filename):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid file extension"
+                )
+            
+            if not self.files_service.validate_file_size(avatar_file.size):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="File size exceeds the maximum allowed size"
+                )
+            
+            # Reuse existing avatar file or create new one
+            if current_avatar_file_id:
+                try:
+                    file_data = self.files_service.update_file(UUID4(current_avatar_file_id), avatar_file)
+                    avatar_file_id = UUID4(file_data['id'])
+                except HTTPException:
+                    # If update fails (file not found), create new one
+                    file_data = self.files_service.upload_file(
+                        avatar_file, 
+                        user_id, 
+                        org_id or UUID4(project_data['org_id']), 
+                        project_id
+                    )
+                    avatar_file_id = file_data.id
+            else:
+                file_data = self.files_service.upload_file(
+                    avatar_file, 
+                    user_id, 
+                    org_id or UUID4(project_data['org_id']), 
+                    project_id
+                )
+                avatar_file_id = file_data.id
+        
+        # Build update dictionary - only include fields that are being updated
+        updates = {
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }
+        
+        if name is not None:
+            updates['name'] = name
+        if avatar_file_id and str(avatar_file_id) != str(current_avatar_file_id):
+            updates['avatar_file_id'] = str(avatar_file_id)
+        if start_date is not None:
+            updates['start_date'] = start_date.isoformat() if isinstance(start_date, date) else start_date
+        if end_date is not None:
+            updates['end_date'] = end_date.isoformat() if isinstance(end_date, date) else end_date
+        
+        # Single optimized update query
+        try:
+            response = supabase.table('projects').update(updates).eq('id', str(project_id)).execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update project: {e}"
+            )
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found"
+            )
+        
+        # Invalidate project summary cache
+        ProjectSummaryCache.delete_summary(str(project_id))
+        
+        # Get avatar URL efficiently
+        updated_project = response.data[0]
+        avatar_url = None
+        if updated_project.get('avatar_file_id'):
+            try:
+                avatar_url = self.files_service.get_file_url(UUID4(updated_project['avatar_file_id']))
+            except HTTPException:
+                pass
+        
+        return ProjectUpdateResponse(
+            id=updated_project['id'],
+            name=updated_project['name'],
+            org_id=updated_project['org_id'],
+            avatar_color=updated_project.get('avatar_color'),
+            avatar_icon=updated_project.get('avatar_icon'),
+            avatar_url=avatar_url,
+            start_date=updated_project['start_date'],
+            end_date=updated_project.get('end_date'),
+            view=updated_project.get('view'),
+            status=updated_project.get('status'),
+            created_at=updated_project['created_at'],
+            updated_at=updated_project['updated_at'],
+        )
         
     def join_project(
         self,
