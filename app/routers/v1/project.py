@@ -70,6 +70,39 @@ def get_project_member_for_attachments(project_id: UUID4, user: any = Depends(ge
     
     return response.data[0]
 
+def get_project_owner_or_admin(project_id: UUID4, user: any = Depends(get_current_user)):
+    """
+    Check if user is project owner or admin.
+    Only project owners and admins can add members to a project.
+    """
+    from app.core import supabase
+    from supabase_auth.errors import AuthApiError
+    
+    try:
+        response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
+    except AuthApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check project membership: {e}"
+        )
+    
+    if not response.data or len(response.data) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not a member of this project"
+        )
+    
+    member = response.data[0]
+    member_role = member.get('role')
+    
+    if member_role not in [ProjectMemberRole.OWNER.value, ProjectMemberRole.ADMIN.value]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only project owners and admins can add members to a project"
+        )
+    
+    return member
+
 def get_project_access(project_id: UUID4, user: any = Depends(get_current_user), active_organization: any = Depends(get_active_organization)):
     """
     Check if user has access to project:
@@ -284,6 +317,24 @@ def get_project(
     """
     project_service = ProjectService()
     return project_service.get_project(project_id)
+
+@router.post("/{project_id}/members", response_model=ProjectMember, status_code=status.HTTP_201_CREATED)
+def add_project_member(
+    project_id: UUID4,
+    member_request: ProjectAddMemberRequest,
+    owner_or_admin: any = Depends(get_project_owner_or_admin),
+):
+    """
+        Add a member to a project.
+        Only project owners and admins can add members.
+        The user being added must be a member of the organization.
+    """
+    project_service = ProjectService()
+    return project_service.add_project_member(
+        project_id=project_id,
+        user_id=member_request.user_id,
+        role=member_request.role
+    )
 
 # @router.put("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
 # def update_project(

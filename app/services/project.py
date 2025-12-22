@@ -1062,6 +1062,70 @@ class ProjectService:
         
         return response.data[0]
     
+    def add_project_member(
+        self,
+        project_id: UUID4,
+        user_id: UUID4,
+        role: ProjectMemberRole,
+    ) -> ProjectMember:
+        """
+        Add a member to a project.
+        Checks if user is already a member to avoid duplicates.
+        """
+        project_id_str = str(project_id)
+        user_id_str = str(user_id)
+        
+        # Check if user is already a member
+        try:
+            existing = supabase.table('project_members').select('id').eq(
+                'project_id', project_id_str
+            ).eq('user_id', user_id_str).execute()
+            
+            if existing.data and len(existing.data) > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="User is already a member of this project"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check existing membership: {e}"
+            )
+        
+        # Verify user belongs to the same organization as the project
+        try:
+            project_response = supabase.table('projects').select('org_id').eq('id', project_id_str).execute()
+            if not project_response.data or len(project_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found"
+                )
+            
+            project_org_id = project_response.data[0]['org_id']
+            
+            # Check if user is a member of the organization
+            org_member_response = supabase.table('organization_members').select('id').eq(
+                'org_id', str(project_org_id)
+            ).eq('user_id', user_id_str).execute()
+            
+            if not org_member_response.data or len(org_member_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User must be a member of the organization to be added to the project"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to verify organization membership: {e}"
+            )
+        
+        # Add the member
+        return self._add_project_member(project_id, user_id, role)
+    
     def _apply_pagination(
         self,
         query: Any,

@@ -34,6 +34,10 @@ class ProjectCreateRequest(BaseModel):
     end_date: Optional[date] = None
     view: Optional[ProjectTasksView] = ProjectTasksView.LIST
 
+class ProjectAddMemberRequest(BaseModel):
+    user_id: UUID4
+    role: ProjectMemberRole = ProjectMemberRole.MEMBER
+
     
 class ProjectResponse(BaseModel):
     id: UUID4

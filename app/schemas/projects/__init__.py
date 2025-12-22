@@ -21,6 +21,7 @@ from .projects import (
     TeamWorkload,
     UserWorkload,
     ProjectResponse,
+    ProjectAddMemberRequest,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "TeamWorkload",
     "UserWorkload",
     "ProjectResponse",
+    "ProjectAddMemberRequest",
 ]
