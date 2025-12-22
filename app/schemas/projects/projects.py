@@ -165,7 +165,6 @@ class TeamWorkload(BaseModel):
 class ProjectSummaryResponse(BaseModel):
     project: Optional[ProjectResponse] = None
     members: List[ProjectMemberSummary] = []
-    latest_attachments: List[ProjectAttachmentSummary] = []
     latest_links: List[ProjectLinkSummary] = []
     task_summary: TaskSummary
     team_workload: TeamWorkload

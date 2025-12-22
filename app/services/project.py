@@ -19,7 +19,6 @@ from app.schemas.projects import (
     ArchivedProjectsResponse,
     ProjectSummaryResponse,
     ProjectMemberSummary,
-    ProjectAttachmentSummary,
     ProjectLinkSummary,
     TaskSummary,
     TeamWorkload,
@@ -29,7 +28,6 @@ from app.schemas.projects import (
 from app.schemas.organizations import OrganizationMemberRole
 from app.services.files import FilesService
 from app.services.activity import ActivityService, ActivityType
-from app.services.attachment import AttachmentService, AttachmentType
 from app.services.link import LinkService, LinkEntityType
 from app.utils import random_color, random_icon, calculate_file_size
 from app.utils.redis_cache import ProjectSummaryCache, UserCache
@@ -629,43 +627,7 @@ class ProjectService:
             # Update project_info with members
             project_info.members = members
             
-            # 2. Get top 5 latest project attachments
-            attachment_service = AttachmentService(self.files_service)
-            attachments_response = attachment_service.get_attachments(
-                AttachmentType.PROJECT,
-                project_id,
-                limit=5,
-                offset=0
-            )
-            
-            latest_attachments = []
-            for att in attachments_response.attachments[:5]:
-                # Get created_at from attachments table
-                try:
-                    att_detail = supabase.table('attachments').select('created_at').eq('id', str(att.id)).execute()
-                    if att_detail.data and att_detail.data[0].get('created_at'):
-                        created_at_str = att_detail.data[0]['created_at']
-                        if isinstance(created_at_str, str):
-                            created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                            if created_at.tzinfo is None:
-                                created_at = created_at.replace(tzinfo=timezone.utc)
-                        else:
-                            created_at = datetime.now(timezone.utc)
-                    else:
-                        created_at = datetime.now(timezone.utc)
-                except Exception as e:
-                    logger.warning(f"Failed to get attachment created_at: {e}")
-                    created_at = datetime.now(timezone.utc)
-                
-                latest_attachments.append(ProjectAttachmentSummary(
-                    id=att.id,
-                    file_name=att.file_name,
-                    file_size=att.file_size,
-                    content_type=att.content_type,
-                    created_at=created_at
-                ))
-            
-            # 3. Get top 5 latest project links
+            # 2. Get top 5 latest project links
             try:
                 links_response = supabase.table('links').select(
                     'id, title, link_url, created_at'
@@ -793,7 +755,6 @@ class ProjectService:
             summary = ProjectSummaryResponse(
                 project=project_info,
                 members=members,
-                latest_attachments=latest_attachments,
                 latest_links=latest_links,
                 task_summary=task_summary,
                 team_workload=team_workload,

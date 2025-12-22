@@ -509,7 +509,6 @@ def get_project_summary(
     
     Returns:
         - Project members (id, display_name, avatar_url)
-        - Top 5 latest project attachments
         - Top 5 latest project links
         - Task summary (completed, incomplete, overdue)
         - Team workload (task assigned percentage, per user percentage, unassigned percentage)
