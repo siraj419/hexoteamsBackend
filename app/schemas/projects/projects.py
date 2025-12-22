@@ -102,6 +102,14 @@ class ProjectUpdateRequest(BaseModel):
     end_date: Optional[date] = None
     view: Optional[ProjectTasksView] = None
 
+class ProjectUpdateOptimizedRequest(BaseModel):
+    name: Optional[str] = None
+    avatar_file_id: Optional[UUID4] = None
+    avatar_color: Optional[str] = None
+    avatar_icon: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
 class ProjectUpdateResponse(ProjectResponse):
     pass
 

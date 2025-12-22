@@ -9,6 +9,7 @@ from app.schemas.projects import (
     ProjectCreateRequest,
     ProjectCreateResponse,
     ProjectUpdateRequest,
+    ProjectUpdateOptimizedRequest,
     ProjectUpdateResponse,
     ProjectGetResponse,
     ProjectGetPaginatedResponse,
@@ -341,10 +342,7 @@ def add_project_member(
 @router.patch("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
 def update_project_optimized(
     project_id: UUID4,
-    name: Optional[str] = Form(None),
-    avatar: Optional[UploadFile] = File(None),
-    start_date: Optional[str] = Form(None),
-    end_date: Optional[str] = Form(None),
+    project_request: ProjectUpdateOptimizedRequest,
     active_organization: any = Depends(get_active_organization),
     project_member: any = Depends(get_project_owner_or_admin),
 ):
@@ -353,12 +351,14 @@ def update_project_optimized(
     
     Updates:
     - name: Project name
-    - avatar: Project avatar (file upload)
-    - start_date: Project start date (YYYY-MM-DD format)
-    - end_date: Project end date (YYYY-MM-DD format)
+    - avatar_file_id: Project avatar file ID (UUID of existing file)
+    - avatar_color: Project avatar color
+    - avatar_icon: Project avatar icon
+    - start_date: Project start date
+    - end_date: Project end date
     
     Requires: Project owner/admin or organization admin/owner
-    Optimized: Single database query, efficient file handling, cache invalidation
+    Optimized: Single database query, cache invalidation
     """
     # Check if user is org admin/owner (can update any project in org)
     # or project owner/admin (can update their project)
@@ -374,43 +374,28 @@ def update_project_optimized(
         )
     
     # Validate that at least one field is being updated
-    if not any([name is not None, avatar is not None, start_date is not None, end_date is not None]):
+    if not any([
+        project_request.name is not None,
+        project_request.avatar_file_id is not None,
+        project_request.avatar_color is not None,
+        project_request.avatar_icon is not None,
+        project_request.start_date is not None,
+        project_request.end_date is not None,
+    ]):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one field (name, avatar, start_date, end_date) must be provided"
+            detail="At least one field must be provided"
         )
-    
-    # Parse date strings
-    parsed_start_date = None
-    parsed_end_date = None
-    
-    if start_date:
-        try:
-            parsed_start_date = date.fromisoformat(start_date)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid start_date format. Use YYYY-MM-DD"
-            )
-    
-    if end_date:
-        try:
-            parsed_end_date = date.fromisoformat(end_date)
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid end_date format. Use YYYY-MM-DD"
-            )
     
     project_service = ProjectService()
     return project_service.update_project_optimized(
         project_id=project_id,
-        name=name,
-        avatar_file=avatar,
-        start_date=parsed_start_date,
-        end_date=parsed_end_date,
-        user_id=active_organization['member_user_id'],
-        org_id=active_organization['id'],
+        name=project_request.name,
+        avatar_file_id=project_request.avatar_file_id,
+        avatar_color=project_request.avatar_color,
+        avatar_icon=project_request.avatar_icon,
+        start_date=project_request.start_date,
+        end_date=project_request.end_date,
     )
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
