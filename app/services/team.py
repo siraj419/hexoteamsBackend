@@ -205,7 +205,7 @@ class TeamService:
         Get all invitations for an organization with pagination.
         """
         query = supabase.table('invitations').select(
-            'id, email, token, invited_by, accepted_at, expires_at, created_at, added_project_ids, as_admin',
+            'id, email, token, invited_by, accepted_at, invalidated_at, expires_at, created_at, added_project_ids, as_admin',
             count='exact'
         ).eq('org_id', str(org_id)).order('created_at', desc=True)
         
@@ -255,7 +255,14 @@ class TeamService:
             expires_at = datetime.fromisoformat(inv['expires_at'].replace('Z', '+00:00'))
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
-            status_str = "accepted" if inv.get('accepted_at') else ("expired" if expires_at < datetime.now(timezone.utc) else "pending")
+            if inv.get('accepted_at'):
+                status_str = "accepted"
+            elif inv.get('invalidated_at'):
+                status_str = "invalidated"
+            elif expires_at < datetime.now(timezone.utc):
+                status_str = "expired"
+            else:
+                status_str = "pending"
             
             invited_projects = []
             if inv.get('added_project_ids'):
@@ -575,11 +582,11 @@ class TeamService:
                 logger.error(f"Failed to send organization invitation notification: {e}")
     
     def _invalidate_existing_invitations(self, org_id: UUID4, email: str) -> None:
-        """Delete existing pending invitations for the same email + org."""
+        """Mark existing pending invitations as invalidated for the same email + org."""
         try:
-            supabase.table('invitations').delete().eq(
-                'org_id', str(org_id)
-            ).contains('email', [email.lower()]).is_('accepted_at', 'null').execute()
+            supabase.table('invitations').update({
+                'invalidated_at': datetime.now(timezone.utc).isoformat(),
+            }).eq('org_id', str(org_id)).contains('email', [email.lower()]).is_('accepted_at', 'null').is_('invalidated_at', 'null').execute()
         except Exception:
             pass
     
@@ -600,6 +607,13 @@ class TeamService:
             )
         
         invitation = response.data[0]
+        
+        # Check if invitation has been invalidated
+        if invitation.get('invalidated_at'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invitation token has been invalidated"
+            )
         
         # Check expiration
         expires_at = datetime.fromisoformat(invitation['expires_at'].replace('Z', '+00:00'))
