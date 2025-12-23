@@ -1152,6 +1152,12 @@ class ProjectService:
                 detail="Failed to add project member"
             )
         
+        # Invalidate project summary cache (affects members list)
+        try:
+            ProjectSummaryCache.delete_summary(str(project_id))
+        except Exception as e:
+            logger.warning(f"Failed to invalidate project summary cache: {e}")
+        
         return response.data[0]
     
     def add_project_member(
