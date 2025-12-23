@@ -107,14 +107,24 @@ class InboxService:
             if reference_id:
                 insert_data['reference_id'] = str(reference_id)
             
+            logger.info(f"Creating inbox notification for user {user_id}: {title}")
             response = supabase.table('inbox').insert(insert_data).execute()
+            logger.info(f"Inbox notification created successfully: {response.data}")
         except AuthApiError as e:
+            logger.error(f"Database error creating inbox: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create inbox: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error creating inbox: {e}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create inbox: {e}"
             )
         
         if not response.data or len(response.data) == 0:
+            logger.error(f"Inbox insert returned no data. Response: {response}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Failed to create inbox"

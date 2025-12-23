@@ -48,15 +48,22 @@ class NotificationService:
         Returns:
             InboxResponse: Created inbox notification
         """
-        inbox_response = self.inbox_service.create_inbox(
-            title=title,
-            message=message,
-            user_id=user_id,
-            org_id=org_id,
-            user_by=user_by,
-            event_type=event_type,
-            reference_id=reference_id,
-        )
+        logger.info(f"Sending inbox notification: {title} to user {user_id}")
+        
+        try:
+            inbox_response = self.inbox_service.create_inbox(
+                title=title,
+                message=message,
+                user_id=user_id,
+                org_id=org_id,
+                user_by=user_by,
+                event_type=event_type,
+                reference_id=reference_id,
+            )
+            logger.info(f"Inbox notification created with ID: {inbox_response.id}")
+        except Exception as e:
+            logger.error(f"Failed to create inbox notification: {e}", exc_info=True)
+            raise
         
         user_preferences = self._get_user_preferences(user_id)
         
