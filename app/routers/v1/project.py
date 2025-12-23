@@ -357,6 +357,7 @@ def add_project_member(
     project_id: UUID4,
     member_request: ProjectAddMemberRequest,
     owner_or_admin: any = Depends(get_project_owner_or_admin),
+    current_user: any = Depends(get_current_user),
 ):
     """
         Add a member to a project.
@@ -367,7 +368,8 @@ def add_project_member(
     return project_service.add_project_member(
         project_id=project_id,
         user_id=member_request.user_id,
-        role=member_request.role
+        role=member_request.role,
+        added_by_id=UUID4(current_user.id),
     )
 
 @router.patch("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)

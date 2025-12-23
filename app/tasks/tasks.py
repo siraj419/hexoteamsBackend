@@ -206,3 +206,37 @@ def send_task_completed_notification(
         import logging
         logger = logging.getLogger(__name__)
         logger.error(f"Failed to send task completed notification: {str(e)}", exc_info=True)
+
+
+@celery_app.task(name='app.tasks.tasks.send_project_member_added_notification')
+def send_project_member_added_notification(
+    user_id: str,
+    org_id: str,
+    project_id: str,
+    project_name: str,
+    added_by_id: str,
+    added_by_name: str,
+):
+    """Send project member added notification via Celery."""
+    try:
+        from pydantic import UUID4
+        from app.services.notification import NotificationService
+        
+        notification_service = NotificationService()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(
+            notification_service.notify_project_member_added(
+                user_id=UUID4(user_id),
+                org_id=UUID4(org_id),
+                project_id=UUID4(project_id),
+                project_name=project_name,
+                added_by_id=UUID4(added_by_id),
+                added_by_name=added_by_name,
+            )
+        )
+        loop.close()
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to send project member added notification: {str(e)}", exc_info=True)

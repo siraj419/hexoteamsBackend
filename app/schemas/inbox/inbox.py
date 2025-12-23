@@ -10,6 +10,7 @@ class InboxEventType(str, Enum):
     TASK_UNASSIGNED = "task_unassigned"
     DIRECT_MESSAGE = "direct_message"
     TASK_COMPLETED = "task_completed"
+    PROJECT_MEMBER_ADDED = "project_member_added"
 
 
 class InboxResponse(BaseModel):

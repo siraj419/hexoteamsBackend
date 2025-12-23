@@ -163,11 +163,13 @@ class TeamService:
             # Add user to organization and projects
             org_id = UUID4(invitation['org_id'])
             project_ids = [UUID4(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else []
+            inviter_id = UUID4(invitation['invited_by']) if invitation.get('invited_by') else None
             self._add_user_to_organization_and_projects(
                 user_id,
                 org_id,
                 project_ids,
-                invitation.get('as_admin', False)
+                invitation.get('as_admin', False),
+                inviter_id=inviter_id
             )
             
             # Mark invitation as accepted
@@ -497,6 +499,7 @@ class TeamService:
         user_id: UUID4,
         add_as_admin: bool,
         project_ids: List[UUID4] = [],
+        inviter_id: Optional[UUID4] = None,
     ) -> None:
         """Add user to multiple projects."""
         role = ProjectMemberRole.ADMIN if add_as_admin else ProjectMemberRole.MEMBER
@@ -508,7 +511,13 @@ class TeamService:
                 if existing.data:
                     continue  # Already a member, skip
                 
-                self.project_service._add_project_member(project_id, user_id, role)
+                self.project_service._add_project_member(
+                    project_id, 
+                    user_id, 
+                    role, 
+                    added_by_id=inviter_id,
+                    skip_notification=False
+                )
             except Exception as e:
                 import logging
                 logger = logging.getLogger(__name__)
@@ -633,12 +642,13 @@ class TeamService:
         org_id: UUID4,
         project_ids: List[UUID4],
         add_as_admin: bool,
+        inviter_id: Optional[UUID4] = None,
     ) -> None:
         """Add user to organization and projects atomically."""
         # Check if already a member (idempotency)
         if self._is_organization_member(org_id, user_id):
             # User already in org, just add to projects
-            self._add_user_to_projects(user_id, add_as_admin, project_ids)
+            self._add_user_to_projects(user_id, add_as_admin, project_ids, inviter_id=inviter_id)
             return
         
         # Add to organization
@@ -646,7 +656,7 @@ class TeamService:
         self.organization_service._add_organization_member(org_id, user_id, org_role)
         
         # Add to projects
-        self._add_user_to_projects(user_id, add_as_admin, project_ids)
+        self._add_user_to_projects(user_id, add_as_admin, project_ids, inviter_id=inviter_id)
     
     def _mark_invitation_accepted(self, invitation_id: UUID4) -> None:
         """Mark invitation as accepted."""

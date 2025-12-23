@@ -9,6 +9,7 @@ from app.tasks.tasks import (
     send_task_unassigned_notification,
     send_direct_message_notification,
     send_task_completed_notification,
+    send_project_member_added_notification,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,4 +226,41 @@ def trigger_task_completed_notification(
             )
         except Exception as fallback_error:
             logger.error(f"Failed to send task completed notification: {fallback_error}", exc_info=True)
+
+
+def trigger_project_member_added_notification(
+    user_id: UUID4,
+    org_id: UUID4,
+    project_id: UUID4,
+    project_name: str,
+    added_by_id: UUID4,
+    added_by_name: str,
+):
+    """Helper to trigger project member added notification via Celery with fallback"""
+    try:
+        send_project_member_added_notification.delay(
+            user_id=str(user_id),
+            org_id=str(org_id),
+            project_id=str(project_id),
+            project_name=project_name,
+            added_by_id=str(added_by_id),
+            added_by_name=added_by_name,
+        )
+    except Exception as e:
+        logger.warning(f"Celery task failed, using direct call: {e}")
+        try:
+            from app.services.notification import NotificationService
+            notification_service = NotificationService()
+            run_async_task(
+                notification_service.notify_project_member_added(
+                    user_id=user_id,
+                    org_id=org_id,
+                    project_id=project_id,
+                    project_name=project_name,
+                    added_by_id=added_by_id,
+                    added_by_name=added_by_name,
+                )
+            )
+        except Exception as fallback_error:
+            logger.error(f"Failed to send project member added notification: {fallback_error}", exc_info=True)
 

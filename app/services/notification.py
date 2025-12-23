@@ -225,6 +225,29 @@ class NotificationService:
                 detail=f"Failed to notify project members: {e}"
             )
     
+    async def notify_project_member_added(
+        self,
+        user_id: UUID4,
+        org_id: UUID4,
+        project_id: UUID4,
+        project_name: str,
+        added_by_id: UUID4,
+        added_by_name: str,
+    ):
+        """Notify user about being added to a project"""
+        title = f"Added to Project: {project_name}"
+        message = f"{added_by_name} added you as a member to the project '{project_name}'"
+        
+        return await self.send_inbox_notification(
+            title=title,
+            message=message,
+            user_id=user_id,
+            org_id=org_id,
+            user_by=added_by_id,
+            event_type=InboxEventType.PROJECT_MEMBER_ADDED,
+            reference_id=project_id,
+        )
+    
     async def _send_browser_notification(
         self,
         user_id: UUID4,

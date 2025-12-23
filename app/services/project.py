@@ -1130,6 +1130,8 @@ class ProjectService:
         project_id: UUID4,
         user_id: UUID4,
         role: ProjectMemberRole,
+        added_by_id: Optional[UUID4] = None,
+        skip_notification: bool = False,
     ) -> ProjectMember:
         try:
             role_value = role.value if isinstance(role, ProjectMemberRole) else role
@@ -1158,6 +1160,34 @@ class ProjectService:
         except Exception as e:
             logger.warning(f"Failed to invalidate project summary cache: {e}")
         
+        # Send notification if added_by_id is provided and not skipped
+        if added_by_id and not skip_notification and str(added_by_id) != str(user_id):
+            try:
+                from app.utils.inbox_helpers import trigger_project_member_added_notification
+                
+                # Get project info
+                project_response = supabase.table('projects').select('name, org_id').eq('id', str(project_id)).execute()
+                if project_response.data:
+                    project_name = project_response.data[0].get('name', 'Unknown Project')
+                    org_id = project_response.data[0].get('org_id')
+                    
+                    # Get adder info
+                    adder_response = supabase.table('profiles').select('display_name').eq('user_id', str(added_by_id)).execute()
+                    added_by_name = 'Someone'
+                    if adder_response.data:
+                        added_by_name = adder_response.data[0].get('display_name', 'Someone')
+                    
+                    trigger_project_member_added_notification(
+                        user_id=user_id,
+                        org_id=UUID4(org_id),
+                        project_id=project_id,
+                        project_name=project_name,
+                        added_by_id=added_by_id,
+                        added_by_name=added_by_name,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to send project member added notification: {e}")
+        
         return response.data[0]
     
     def add_project_member(
@@ -1165,6 +1195,7 @@ class ProjectService:
         project_id: UUID4,
         user_id: UUID4,
         role: ProjectMemberRole,
+        added_by_id: Optional[UUID4] = None,
     ) -> ProjectMember:
         """
         Add a member to a project.
@@ -1222,7 +1253,7 @@ class ProjectService:
             )
         
         # Add the member
-        return self._add_project_member(project_id, user_id, role)
+        return self._add_project_member(project_id, user_id, role, added_by_id=added_by_id)
     
     def _apply_pagination(
         self,
