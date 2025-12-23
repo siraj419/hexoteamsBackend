@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from supabase_auth.errors import AuthApiError
 
 from app.core import supabase
+from app.core.config import Settings
 from app.schemas.teams import (
     TeamInviteRequest,
     TeamInvitationsResponse,
@@ -26,6 +27,8 @@ from app.services.files import FilesService
 from app.utils import calculate_time_ago, apply_pagination
 from app.utils.inbox_helpers import trigger_organization_invitation_notification
 from app.tasks.tasks import send_email_task
+
+settings = Settings()
 
 class TeamService:
     def __init__(self):
@@ -520,8 +523,8 @@ class TeamService:
         # Generate secure token
         token = secrets.token_urlsafe(32)
         
-        # Set expiration (7 days from now)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+        # Set expiration from config
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.INVITATION_TOKEN_EXPIRATION_HOURS)
         
         try:
             response = supabase.table('invitations').insert({
@@ -783,8 +786,6 @@ class TeamService:
         inviter_name: str,
     ) -> None:
         """Send invitation email via Celery."""
-        from app.core.config import Settings
-        settings = Settings()
         
         frontend_url = settings.FRONTEND_URL
         accept_url = f"{frontend_url}/accept-invitation?token={token}"
@@ -826,8 +827,6 @@ class TeamService:
         inviter_name: str,
     ) -> None:
         """Send informational email when user is added to projects."""
-        from app.core.config import Settings
-        settings = Settings()
         
         project_names = self._get_project_names(project_ids)
         frontend_url = settings.FRONTEND_URL

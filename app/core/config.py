@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     DEFAULT_PAGINATION_LIMIT: int = Field(default=10, description="Default pagination limit")
     DEFAULT_PAGINATION_OFFSET: int = Field(default=0, description="Default pagination offset")
     
+    # Invitation Settings
+    INVITATION_TOKEN_EXPIRATION_HOURS: int = Field(default=24, description="Invitation token expiration time in hours (default: 24 hours)")
+    
     # other details
     MAX_COMMENT_REPLY_DEPTH: int = Field(default=3, description="Maximum comment reply depth")
     MAX_SUBTASK_DEPTH: int = Field(default=3, description="Maximum subtask depth")
