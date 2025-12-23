@@ -205,7 +205,7 @@ class TeamService:
         Get all invitations for an organization with pagination.
         """
         query = supabase.table('invitations').select(
-            'id, email, token, invited_by, accepted_at, invalidated_at, expires_at, created_at, added_project_ids, as_admin',
+            'id, email, token, invited_by, accepted_at, expires_at, created_at, added_project_ids, as_admin',
             count='exact'
         ).eq('org_id', str(org_id)).order('created_at', desc=True)
         
@@ -586,7 +586,7 @@ class TeamService:
         try:
             supabase.table('invitations').update({
                 'invalidated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('org_id', str(org_id)).contains('email', [email.lower()]).is_('accepted_at', 'null').is_('invalidated_at', 'null').execute()
+            }).eq('org_id', str(org_id)).contains('email', [email.lower()]).is_('accepted_at', 'null').execute()
         except Exception:
             pass
     
