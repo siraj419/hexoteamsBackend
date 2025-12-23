@@ -296,7 +296,7 @@ class TeamService:
                 invitation_time=calculate_time_ago(inv['created_at'], 'utc'),
                 invited_by=invited_by_info,
                 expires_at=datetime.fromisoformat(inv['expires_at'].replace('Z', '+00:00')) if inv.get('expires_at') else None,
-                as_admin=inv.get('add_as_admin', False),
+                as_admin=inv.get('as_admin', False),
             ))
         
         return {'invitations': invitations, 'total': total, 'limit': limit, 'offset': offset}
