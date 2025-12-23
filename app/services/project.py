@@ -1132,10 +1132,11 @@ class ProjectService:
         role: ProjectMemberRole,
     ) -> ProjectMember:
         try:
+            role_value = role.value if isinstance(role, ProjectMemberRole) else role
             response = supabase.table('project_members').insert({
                 'project_id': str(project_id),
                 'user_id': str(user_id),
-                'role': role,
+                'role': role_value,
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).execute()
