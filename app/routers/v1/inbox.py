@@ -53,6 +53,24 @@ def get_all_inbox(
     )
 
 
+@router.get('/archived', response_model=InboxGetPaginatedResponse, status_code=status.HTTP_200_OK)
+def get_archived_inbox(
+    limit: Optional[int] = Query(50, ge=1, le=100, description="Number of items per page"),
+    offset: Optional[int] = Query(0, ge=0, description="Number of items to skip"),
+    organization: Any = Depends(get_active_organization),
+):
+    """
+    Get only archived inbox notifications with pagination.
+    """
+    inbox_service = InboxService()
+    return inbox_service.get_archived_inbox(
+        user_id=UUID4(organization['member_user_id']),
+        org_id=UUID4(organization['id']),
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get('/{inbox_id}', response_model=InboxGetResponse, status_code=status.HTTP_200_OK)
 def get_inbox(
     inbox_id: UUID4,

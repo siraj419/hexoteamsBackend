@@ -217,6 +217,68 @@ class InboxService:
         
         return result
     
+    def get_archived_inbox(
+        self, 
+        user_id: UUID4,
+        org_id: UUID4,
+        limit: Optional[int] = 50,
+        offset: Optional[int] = 0,
+    ) -> InboxGetPaginatedResponse:
+        """Get only archived inbox notifications with pagination."""
+        cache_key = f"inbox:archived:{user_id}:{org_id}:{limit}:{offset}"
+        
+        if redis_client:
+            try:
+                cached = redis_client.get(cache_key)
+                if cached:
+                    data = json.loads(cached)
+                    return InboxGetPaginatedResponse(**data)
+            except Exception as e:
+                logger.warning(f"Redis get error: {e}")
+        
+        query = supabase.table('inbox').select('*', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id)).eq('is_archived', True)
+        
+        query = query.order('created_at', desc=True).range(offset, offset + limit - 1)
+        
+        try:
+            response = query.execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get archived inbox: {e}"
+            )
+        
+        user_time_zone = self._get_user_time_zone(user_id)
+            
+        inboxes = []
+        for inbox in response.data:
+            message_time = calculate_time_ago(inbox['created_at'], user_time_zone)
+            inboxes.append(InboxResponse(
+                id=inbox['id'],
+                title=inbox['title'],
+                message=inbox['message'],
+                message_time=message_time,
+                is_read=inbox.get('is_read', False),
+                is_archived=inbox.get('is_archived', False),
+                event_type=inbox.get('event_type'),
+                reference_id=inbox.get('reference_id'),
+            ))
+        
+        result = InboxGetPaginatedResponse(
+            inbox=inboxes,
+            total=response.count if response.count else 0,
+            offset=offset,
+            limit=limit,
+        )
+        
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, self.CACHE_TTL, json.dumps(result.model_dump(mode='json')))
+            except Exception as e:
+                logger.warning(f"Redis set error: {e}")
+        
+        return result
+    
     def mark_read(self, inbox_id: UUID4, user_id: UUID4) -> InboxMarkReadResponse:
         try:
             response = supabase.table('inbox').update({
@@ -386,6 +448,10 @@ class InboxService:
         try:
             pattern = f"inbox:list:{user_id}:{org_id}:*"
             for key in redis_client.scan_iter(match=pattern):
+                redis_client.delete(key)
+            
+            archived_pattern = f"inbox:archived:{user_id}:{org_id}:*"
+            for key in redis_client.scan_iter(match=archived_pattern):
                 redis_client.delete(key)
             
             redis_client.delete(f"inbox:unread:{user_id}:{org_id}")
