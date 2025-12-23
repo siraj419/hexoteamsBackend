@@ -377,10 +377,11 @@ class OrganizationService:
     ) -> Any:
         
         try:
+            role_value = role.value if isinstance(role, OrganizationMemberRole) else role
             response = supabase.table('organization_members').insert({
                 'org_id': str(organization_id),
                 'user_id': str(user_id),
-                'role': role,
+                'role': role_value,
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).execute()
