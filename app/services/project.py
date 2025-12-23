@@ -1133,6 +1133,7 @@ class ProjectService:
         added_by_id: Optional[UUID4] = None,
         skip_notification: bool = False,
     ) -> ProjectMember:
+        logger.info(f"Adding project member {user_id} to project {project_id} with role {role} and added_by_id {added_by_id} and skip_notification {skip_notification}")
         try:
             role_value = role.value if isinstance(role, ProjectMemberRole) else role
             response = supabase.table('project_members').insert({
