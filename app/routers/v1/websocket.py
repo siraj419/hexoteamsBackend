@@ -311,7 +311,7 @@ async def inbox_websocket(
     
     try:
         response = supabase.table('organization_members').select('id').eq(
-            'organization_id', org_id
+            'org_id', org_id
         ).eq('user_id', user_id).execute()
         
         if not response.data:
