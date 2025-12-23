@@ -142,10 +142,16 @@ class InboxService:
         user_id: UUID4,
         org_id: UUID4,
         include_archived: bool = False,
+        unread_only: bool = False,
+        order_by: Optional[str] = "desc",
         limit: Optional[int] = 50,
         offset: Optional[int] = 0,
     ) -> InboxGetPaginatedResponse:
-        cache_key = f"inbox:list:{user_id}:{org_id}:{include_archived}:{limit}:{offset}"
+        # Normalize order_by to ensure valid value
+        if order_by not in ["asc", "desc"]:
+            order_by = "desc"
+        
+        cache_key = f"inbox:list:{user_id}:{org_id}:{include_archived}:{unread_only}:{order_by}:{limit}:{offset}"
         
         if redis_client:
             try:
@@ -161,7 +167,16 @@ class InboxService:
         if not include_archived:
             query = query.eq('is_archived', False)
         
-        query = query.order('created_at', desc=True).range(offset, offset + limit - 1)
+        if unread_only:
+            query = query.eq('is_read', False)
+        
+        # Apply ordering by created_at
+        if order_by == "asc":
+            query = query.order('created_at', desc=False)
+        else:
+            query = query.order('created_at', desc=True)
+        
+        query = query.range(offset, offset + limit - 1)
         
         try:
             response = query.execute()

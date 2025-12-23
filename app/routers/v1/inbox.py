@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 from pydantic import UUID4
 
 from app.schemas.inbox import (
@@ -35,6 +35,8 @@ def get_unread_count(
 @router.get('/', response_model=InboxGetPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_all_inbox(
     include_archived: bool = Query(False, description="Include archived messages"),
+    unread_only: bool = Query(False, description="Filter to show only unread messages"),
+    order_by: Literal["asc", "desc"] = Query("desc", description="Order by created_at: 'asc' or 'desc'"),
     limit: Optional[int] = Query(50, ge=1, le=100, description="Number of items per page"),
     offset: Optional[int] = Query(0, ge=0, description="Number of items to skip"),
     organization: Any = Depends(get_active_organization),
@@ -44,6 +46,8 @@ def get_all_inbox(
         user_id=UUID4(organization['member_user_id']),
         org_id=UUID4(organization['id']),
         include_archived=include_archived,
+        unread_only=unread_only,
+        order_by=order_by,
         limit=limit,
         offset=offset,
     )
