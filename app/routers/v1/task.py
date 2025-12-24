@@ -15,6 +15,7 @@ from app.schemas.tasks import (
     TaskGetCommentResponse,
     TaskGetCommentsPaginatedResponse,
     TaskSubtasksPaginatedResponse,
+    TasksPaginatedResponse,
     TaskStatus,
     TaskChangeAssigneeRequest,
     TaskChangeStatusRequest,
@@ -30,7 +31,7 @@ from app.schemas.tasks import (
     TaskLinkUpdateRequest,
 )
 
-from app.routers.deps import get_project_member, verify_task_delete_permission
+from app.routers.deps import get_project_member, verify_task_delete_permission, get_active_organization
 from app.services.activity import ActivityService, ActivityType
 from app.services.files import FilesService
 from app.services.attachment import AttachmentService
@@ -356,6 +357,39 @@ def get_task_comments(
     """
     task_service = TaskService()
     return task_service.get_task_comments(task_id, member['user_id'], limit=limit, offset=offset)
+
+@router.get('/my-tasks', response_model=TasksPaginatedResponse, status_code=status.HTTP_200_OK)
+def get_my_tasks(
+    active_organization: Any = Depends(get_active_organization),
+    search: Optional[str] = None,
+    status: Optional[TaskStatus] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+):
+    """
+    Get tasks assigned to the current user in the active organization.
+    
+    Returns paginated response with tasks assigned to the authenticated user.
+    Only includes tasks from projects in the user's active organization.
+    
+    Query params:
+        - search: Optional[str] - Search tasks by title
+        - status: Optional[TaskStatus] - Filter by task status
+        - limit: Optional[int] - Number of tasks per page
+        - offset: Optional[int] - Number of tasks to skip
+    
+    Returns:
+        TasksPaginatedResponse with tasks, total, offset, and limit
+    """
+    task_service = TaskService()
+    return task_service.get_user_assigned_tasks(
+        user_id=UUID4(active_organization['member_user_id']),
+        org_id=UUID4(active_organization['id']),
+        search=search,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
 
 @router.get('/', response_model=List[TaskResponse], status_code=status.HTTP_200_OK)
 def list_tasks(

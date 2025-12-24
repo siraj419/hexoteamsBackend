@@ -133,6 +133,12 @@ class TaskSubtasksPaginatedResponse(BaseModel):
     offset: Optional[int] = None
     limit: Optional[int] = None
 
+class TasksPaginatedResponse(BaseModel):
+    tasks: List['TaskResponse']
+    total: int
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
 class TaskGetResponse(BaseModel):
     id: UUID4
     title: str

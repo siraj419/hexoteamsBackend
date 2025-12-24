@@ -909,6 +909,91 @@ class TaskService:
             limit=limit,
         )
     
+    def get_user_assigned_tasks(
+        self,
+        user_id: UUID4,
+        org_id: UUID4,
+        search: Optional[str] = None,
+        status: Optional[TaskStatus] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ):
+        """
+        Get tasks assigned to the user in the active organization.
+        Returns paginated response with total count.
+        """
+        from app.schemas.tasks import TasksPaginatedResponse
+        
+        # First, get all project IDs in the organization
+        try:
+            projects_response = supabase.table('projects').select('id').eq('org_id', str(org_id)).execute()
+            if not projects_response.data:
+                return TasksPaginatedResponse(
+                    tasks=[],
+                    total=0,
+                    offset=offset,
+                    limit=limit,
+                )
+            project_ids = [str(project['id']) for project in projects_response.data]
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get projects: {e}"
+            )
+        
+        # Query tasks assigned to user in these projects
+        query = supabase.table('tasks').select('*', count='exact').eq('assignee_id', str(user_id)).in_('project_id', project_ids).is_('parent_id', 'null').order('created_at', desc=True)
+        
+        if status:
+            query = query.eq('status', status.value)
+        if search:
+            query = query.ilike('title', f'%{search}%')
+        
+        limit, offset, query = apply_pagination(query, limit, offset)
+        
+        try:
+            response = query.execute()
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get assigned tasks: {e}"
+            )
+        
+        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
+        
+        if not response.data:
+            return TasksPaginatedResponse(
+                tasks=[],
+                total=total_count,
+                offset=offset,
+                limit=limit,
+            )
+        
+        all_assignee_ids = set()
+        for task in response.data:
+            if task.get('assignee_id'):
+                all_assignee_ids.add(task['assignee_id'])
+        
+        assignee_cache = {}
+        if all_assignee_ids:
+            assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
+        
+        tasks = [TaskResponse(
+            id=task['id'],
+            title=task['title'],
+            content=task['content'],
+            status=task['status'],
+            due_date=task['due_date'],
+            assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
+        ) for task in response.data]
+        
+        return TasksPaginatedResponse(
+            tasks=tasks,
+            total=total_count,
+            offset=offset,
+            limit=limit,
+        )
+    
     def get_task_attachments(
         self,
         task_id: UUID4,
