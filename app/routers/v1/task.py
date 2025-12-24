@@ -32,7 +32,9 @@ from app.schemas.tasks import (
 from app.routers.deps import get_project_member, verify_task_delete_permission
 from app.services.activity import ActivityService, ActivityType
 from app.services.files import FilesService
+from app.services.attachment import AttachmentService
 from app.schemas.activities import ActivityGetPaginatedResponse
+from app.schemas.chat import AttachmentDownloadResponse
 from app.schemas.links import (
     LinkEntityType,
     LinkResponse,
@@ -434,3 +436,44 @@ def delete_task(
         force_delete=permission.get('is_org_admin', False)
     )
     return None
+
+@router.get('/comments/attachments/{attachment_id}/download', response_model=AttachmentDownloadResponse, status_code=status.HTTP_200_OK)
+def download_comment_attachment(
+    attachment_id: UUID4,
+    project_id: UUID4 = Query(...),
+    member: Any = Depends(get_project_member),
+):
+    """
+    Download a comment attachment.
+    
+    Only project members can download comment attachments.
+    The endpoint verifies:
+    1. Attachment exists and is a comment attachment
+    2. Comment belongs to a task in the specified project
+    3. User is a member of the project
+    
+    Query params:
+        - project_id: UUID4 (required) - The project ID to verify membership
+    
+    Returns:
+        AttachmentDownloadResponse with download_url and expires_at
+    
+    Example:
+        GET /api/v1/tasks/comments/attachments/{attachment_id}/download?project_id={project_id}
+    """
+    files_service = FilesService()
+    attachment_service = AttachmentService(files_service=files_service)
+    
+    try:
+        result = attachment_service.get_comment_attachment_download_url(
+            attachment_id=attachment_id,
+            user_id=UUID4(member['user_id'])
+        )
+        return AttachmentDownloadResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get download URL: {str(e)}"
+        )

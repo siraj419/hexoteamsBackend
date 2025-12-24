@@ -180,3 +180,123 @@ class AttachmentService:
             ProjectSummaryCache.delete_summary(str(entity_id))
         
         return True
+    
+    def get_comment_attachment_download_url(
+        self,
+        attachment_id: UUID4,
+        user_id: UUID4,
+    ) -> dict:
+        """
+        Get signed URL for comment attachment download.
+        Verifies that the user is a project member.
+        
+        Args:
+            attachment_id: The attachment ID
+            user_id: The requesting user ID
+            
+        Returns:
+            Dict with download_url and expires_at
+            
+        Raises:
+            HTTPException: If attachment not found or access denied
+        """
+        from datetime import timedelta
+        
+        # Get attachment info
+        try:
+            attachment_response = supabase.table('attachments').select(
+                'id, entity_id, entity_type, file_id'
+            ).eq('id', str(attachment_id)).execute()
+            
+            if not attachment_response.data or len(attachment_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get attachment: {e}"
+            )
+        
+        attachment = attachment_response.data[0]
+        
+        # Verify it's a comment attachment
+        if attachment.get('entity_type') != AttachmentType.COMMENT.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This endpoint is only for comment attachments"
+            )
+        
+        comment_id = attachment['entity_id']
+        
+        # Get comment to find task_id
+        try:
+            comment_response = supabase.table('task_comments').select('task_id').eq('id', comment_id).execute()
+            
+            if not comment_response.data or len(comment_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comment not found"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get comment: {e}"
+            )
+        
+        task_id = comment_response.data[0]['task_id']
+        
+        # Get task to find project_id
+        try:
+            task_response = supabase.table('tasks').select('project_id').eq('id', task_id).execute()
+            
+            if not task_response.data or len(task_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Task not found"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get task: {e}"
+            )
+        
+        project_id = task_response.data[0]['project_id']
+        
+        # Verify user is a project member
+        try:
+            member_response = supabase.table('project_members').select('id').eq(
+                'project_id', project_id
+            ).eq('user_id', str(user_id)).execute()
+            
+            if not member_response.data or len(member_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only project members can download comment attachments"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to verify project membership: {e}"
+            )
+        
+        # Get file URL (presigned URL)
+        file_id = attachment['file_id']
+        download_url = self.files_service.get_file_url(file_id)
+        
+        # Calculate expiration (presigned URLs typically expire in 1 hour)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        
+        return {
+            'download_url': download_url,
+            'expires_at': expires_at
+        }
