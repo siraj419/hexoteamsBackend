@@ -29,6 +29,8 @@ from .tasks import (
     TaskChangeAssigneeRequest,
     TaskChangeStatusRequest,
     TaskUpdateDetailsRequest,
+    TaskMinimalResponse,
+    ProjectTasksMinimalResponse,
 )
 
 __all__ = [
@@ -62,4 +64,6 @@ __all__ = [
     "TaskChangeAssigneeRequest",
     "TaskChangeStatusRequest",
     "TaskUpdateDetailsRequest",
+    "TaskMinimalResponse",
+    "ProjectTasksMinimalResponse",
 ]
