@@ -437,6 +437,47 @@ def delete_task(
     )
     return None
 
+@router.get('/attachments/{attachment_id}/download', response_model=AttachmentDownloadResponse, status_code=status.HTTP_200_OK)
+def download_task_attachment(
+    attachment_id: UUID4,
+    project_id: UUID4 = Query(...),
+    member: Any = Depends(get_project_member),
+):
+    """
+    Download a task attachment.
+    
+    Only project members can download task attachments.
+    The endpoint verifies:
+    1. Attachment exists and is a task attachment
+    2. Task belongs to the specified project
+    3. User is a member of the project
+    
+    Query params:
+        - project_id: UUID4 (required) - The project ID to verify membership
+    
+    Returns:
+        AttachmentDownloadResponse with download_url and expires_at
+    
+    Example:
+        GET /api/v1/tasks/attachments/{attachment_id}/download?project_id={project_id}
+    """
+    files_service = FilesService()
+    attachment_service = AttachmentService(files_service=files_service)
+    
+    try:
+        result = attachment_service.get_task_attachment_download_url(
+            attachment_id=attachment_id,
+            user_id=UUID4(member['user_id'])
+        )
+        return AttachmentDownloadResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get download URL: {str(e)}"
+        )
+
 @router.get('/comments/attachments/{attachment_id}/download', response_model=AttachmentDownloadResponse, status_code=status.HTTP_200_OK)
 def download_comment_attachment(
     attachment_id: UUID4,
