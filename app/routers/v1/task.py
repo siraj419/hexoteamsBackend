@@ -14,6 +14,7 @@ from app.schemas.tasks import (
     TaskCreateAttachmentRequest,
     TaskGetCommentResponse,
     TaskGetCommentsPaginatedResponse,
+    TaskSubtasksPaginatedResponse,
     TaskStatus,
     TaskChangeAssigneeRequest,
     TaskChangeStatusRequest,
@@ -381,7 +382,7 @@ def list_tasks(
         offset=offset,
     )
 
-@router.get('/{task_id}/subtasks', response_model=List[TaskResponse], status_code=status.HTTP_200_OK)
+@router.get('/{task_id}/subtasks', response_model=TaskSubtasksPaginatedResponse, status_code=status.HTTP_200_OK)
 def list_subtasks(
     task_id: UUID4,
     project_id: UUID4 = Query(...),
@@ -393,9 +394,9 @@ def list_subtasks(
     offset: Optional[int] = None,
 ):
     """
-    List all subtasks for a task.
-    Returns subtasks in the same format as list tasks endpoint.
-    Supports filtering and pagination.
+    List all subtasks for a task with pagination.
+    Returns paginated response with subtasks, total count, offset, and limit.
+    Supports filtering by search, assignee_id, and status.
     """
     task_service = TaskService()
     return task_service.list_subtasks(

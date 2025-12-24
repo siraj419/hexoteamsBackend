@@ -127,6 +127,12 @@ class TaskGetCommentsPaginatedResponse(BaseModel):
     offset: Optional[int] = None
     limit: Optional[int] = None
 
+class TaskSubtasksPaginatedResponse(BaseModel):
+    subtasks: List[TaskResponse]
+    total: int
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
 class TaskGetResponse(BaseModel):
     id: UUID4
     title: str

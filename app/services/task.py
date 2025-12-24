@@ -845,12 +845,15 @@ class TaskService:
         status: Optional[TaskStatus] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-    ) -> List[TaskResponse]:
+    ):
         """
         List all subtasks for a given task with filters and pagination.
         Optimized to batch fetch assignee info.
+        Returns paginated response with total count.
         """
-        query = supabase.table('tasks').select('*').eq('parent_id', str(task_id))
+        from app.schemas.tasks import TaskSubtasksPaginatedResponse
+        
+        query = supabase.table('tasks').select('*', count='exact').eq('parent_id', str(task_id))
         
         if user_id:
             query = query.eq('created_by', str(user_id))
@@ -871,8 +874,15 @@ class TaskService:
                 detail=f"Failed to get subtasks: {e}"
             )
         
+        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
+        
         if not response.data:
-            return []
+            return TaskSubtasksPaginatedResponse(
+                subtasks=[],
+                total=total_count,
+                offset=offset,
+                limit=limit,
+            )
         
         all_assignee_ids = set()
         for task in response.data:
@@ -883,7 +893,7 @@ class TaskService:
         if all_assignee_ids:
             assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
         
-        return [TaskResponse(
+        subtasks = [TaskResponse(
             id=task['id'],
             title=task['title'],
             content=task['content'],
@@ -891,6 +901,13 @@ class TaskService:
             due_date=task['due_date'],
             assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
         ) for task in response.data]
+        
+        return TaskSubtasksPaginatedResponse(
+            subtasks=subtasks,
+            total=total_count,
+            offset=offset,
+            limit=limit,
+        )
     
     def get_task_attachments(
         self,
