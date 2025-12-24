@@ -455,6 +455,10 @@ class FilesService:
                 detail=f"Failed to check file ownership: {e}"
             )
         
+        # If file doesn't exist, return False
+        if not response.data or len(response.data) == 0:
+            return False
+        
         return response.data[0]['uploaded_by'] == str(user_id)
     
     def upload_chat_attachment(
