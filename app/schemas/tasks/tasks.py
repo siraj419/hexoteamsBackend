@@ -153,6 +153,13 @@ class TaskGetResponse(BaseModel):
     links: Optional[List[LinkResponse]] = []
     sub_tasks: Optional[List[TaskBaseResponse]] = []
 
+class TaskProjectInfo(BaseModel):
+    id: UUID4
+    name: str
+    avatar_color: Optional[str] = None
+    avatar_icon: Optional[str] = None
+    avatar_url: Optional[str] = None
+
 class TaskResponse(BaseModel):
     id: UUID4
     title: str
@@ -160,6 +167,7 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     due_date: Optional[datetime] = None
     assignee: Optional[TaskUserInfoResponse] = None
+    project: Optional[TaskProjectInfo] = None
     
 class TaskLinkRequest(LinkRequest):
     pass

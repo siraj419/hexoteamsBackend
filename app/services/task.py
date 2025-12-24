@@ -41,7 +41,8 @@ from app.services.attachment import AttachmentService
 from app.services.activity import ActivityService, ActivityType
 from app.services.link import LinkService, LinkEntityType
 from app.utils import calculate_time_ago, apply_pagination, calculate_file_size
-from app.utils.redis_cache import ProjectSummaryCache
+from app.utils.redis_cache import ProjectSummaryCache, redis_client
+import json
 from app.utils.inbox_helpers import (
     trigger_task_assigned_notification,
     trigger_task_unassigned_notification,
@@ -1014,15 +1015,22 @@ class TaskService:
                     limit=limit,
                 )
             
-            # Get assignee info
+            # Get assignee info and project info
             all_assignee_ids = set()
+            all_project_ids = set()
             for task in tasks_list:
                 if task.get('assignee_id'):
                     all_assignee_ids.add(task['assignee_id'])
+                if task.get('project_id'):
+                    all_project_ids.add(task['project_id'])
             
             assignee_cache = {}
             if all_assignee_ids:
                 assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
+            
+            project_cache = {}
+            if all_project_ids:
+                project_cache = self._batch_get_project_info([UUID4(pid) if isinstance(pid, str) else pid for pid in all_project_ids])
             
             tasks = [TaskResponse(
                 id=task['id'],
@@ -1031,6 +1039,7 @@ class TaskService:
                 status=task['status'],
                 due_date=task['due_date'],
                 assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
+                project=project_cache.get(str(task['project_id'])) if task.get('project_id') else None,
             ) for task in tasks_list]
             
             return TasksPaginatedResponse(
@@ -1073,13 +1082,20 @@ class TaskService:
             )
         
         all_assignee_ids = set()
+        all_project_ids = set()
         for task in response.data:
             if task.get('assignee_id'):
                 all_assignee_ids.add(task['assignee_id'])
+            if task.get('project_id'):
+                all_project_ids.add(task['project_id'])
         
         assignee_cache = {}
         if all_assignee_ids:
             assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
+        
+        project_cache = {}
+        if all_project_ids:
+            project_cache = self._batch_get_project_info([UUID4(pid) if isinstance(pid, str) else pid for pid in all_project_ids])
         
         tasks = [TaskResponse(
             id=task['id'],
@@ -1088,6 +1104,7 @@ class TaskService:
             status=task['status'],
             due_date=task['due_date'],
             assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
+            project=project_cache.get(str(task['project_id'])) if task.get('project_id') else None,
         ) for task in response.data]
         
         return TasksPaginatedResponse(
@@ -1493,12 +1510,100 @@ class TaskService:
                     pass
             
             user_info_dict[str(profile['user_id'])] = TaskUserInfoResponse(
-                id=profile['user_id'],
+                id=UUID4(profile['user_id']),
                 display_name=profile['display_name'],
                 avatar_url=avatar_url,
             )
         
         return user_info_dict
+    
+    def _batch_get_project_info(
+        self,
+        project_ids: List[UUID4],
+    ) -> Dict[str, 'TaskProjectInfo']:
+        """
+        Batch fetch project info for multiple project IDs with Redis caching.
+        Returns a dictionary mapping project_id to TaskProjectInfo.
+        """
+        from app.schemas.tasks import TaskProjectInfo
+        
+        if not project_ids:
+            return {}
+        
+        CACHE_TTL = 300  # 5 minutes cache
+        project_info_dict = {}
+        uncached_project_ids = []
+        
+        # Check Redis cache for each project
+        if redis_client:
+            for project_id in project_ids:
+                project_id_str = str(project_id)
+                try:
+                    cached = redis_client.get(f"project_info:{project_id_str}")
+                    if cached:
+                        project_data = json.loads(cached)
+                        # Convert id string to UUID4 for TaskProjectInfo
+                        project_data['id'] = UUID4(project_data['id'])
+                        project_info_dict[project_id_str] = TaskProjectInfo(**project_data)
+                    else:
+                        uncached_project_ids.append(project_id)
+                except Exception as e:
+                    logger.warning(f"Error getting project from cache: {e}")
+                    uncached_project_ids.append(project_id)
+        else:
+            uncached_project_ids = list(project_ids)
+        
+        # Fetch uncached projects from database
+        if uncached_project_ids:
+            try:
+                project_id_strings = [str(pid) if isinstance(pid, UUID) else pid for pid in uncached_project_ids]
+                response = supabase.table('projects').select('id, name, avatar_color, avatar_icon, avatar_file_id').in_('id', project_id_strings).execute()
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to batch get project info: {e}"
+                )
+            
+            # Process fetched projects and cache them
+            for project in response.data:
+                project_id_str = str(project['id'])
+                avatar_url = None
+                
+                if project.get('avatar_file_id'):
+                    try:
+                        avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+                    except Exception:
+                        pass
+                
+                project_info = TaskProjectInfo(
+                    id=UUID4(project['id']),
+                    name=project['name'],
+                    avatar_color=project.get('avatar_color'),
+                    avatar_icon=project.get('avatar_icon'),
+                    avatar_url=avatar_url,
+                )
+                
+                project_info_dict[project_id_str] = project_info
+                
+                # Cache the project info
+                if redis_client:
+                    try:
+                        cache_data = {
+                            'id': project_id_str,
+                            'name': project['name'],
+                            'avatar_color': project.get('avatar_color'),
+                            'avatar_icon': project.get('avatar_icon'),
+                            'avatar_url': avatar_url,
+                        }
+                        redis_client.setex(
+                            f"project_info:{project_id_str}",
+                            CACHE_TTL,
+                            json.dumps(cache_data)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error caching project info: {e}")
+        
+        return project_info_dict
     
     def _get_user_timezone(
         self,
