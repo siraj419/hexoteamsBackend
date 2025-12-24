@@ -21,6 +21,8 @@ from .conversations import (
     ConversationListResponse,
     NotificationSummaryResponse,
     UnreadCountResponse,
+    ProjectConversationResponse,
+    ProjectConversationListResponse,
 )
 
 __all__ = [
@@ -43,5 +45,7 @@ __all__ = [
     "ConversationListResponse",
     "NotificationSummaryResponse",
     "UnreadCountResponse",
+    "ProjectConversationResponse",
+    "ProjectConversationListResponse",
 ]
 

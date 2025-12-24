@@ -44,3 +44,21 @@ class NotificationSummaryResponse(BaseModel):
     direct_messages: List[UnreadCountResponse]
 
 
+class ProjectConversationResponse(BaseModel):
+    project_id: UUID4
+    project_name: str
+    avatar_color: Optional[str] = None
+    avatar_icon: Optional[str] = None
+    avatar_url: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    last_message_preview: Optional[str] = None
+    unread_count: int = 0
+
+
+class ProjectConversationListResponse(BaseModel):
+    conversations: List[ProjectConversationResponse]
+    total: int
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+

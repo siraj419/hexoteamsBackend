@@ -20,6 +20,8 @@ from app.schemas.chat import (
     NotificationSummaryResponse,
     UnreadCountResponse,
     MessageType,
+    ProjectConversationResponse,
+    ProjectConversationListResponse,
 )
 from app.utils import apply_pagination
 from app.utils.redis_cache import UserCache
@@ -638,6 +640,124 @@ class ChatService:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get conversations: {str(e)}"
+            )
+    
+    def get_project_conversations(
+        self,
+        user_id: UUID4,
+        organization_id: UUID4,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Get all project conversations for a user
+        
+        Args:
+            user_id: The user ID
+            organization_id: The organization ID
+            limit: Number of conversations to return
+            offset: Number of conversations to skip
+            
+        Returns:
+            Dict containing project conversations and pagination info
+        """
+        try:
+            # Get all projects where user is a member
+            projects_response = supabase.rpc('get_member_projects', {
+                'user_id': str(user_id),
+                'org_id': str(organization_id),
+            }).eq('archived', False).execute()
+            
+            if not projects_response.data:
+                return {
+                    'conversations': [],
+                    'total': 0,
+                    'limit': limit,
+                    'offset': offset
+                }
+            
+            project_ids = [p['id'] for p in projects_response.data]
+            
+            # Get last message for each project
+            conversations_data = []
+            for project in projects_response.data:
+                project_id = project['id']
+                
+                # Get last message
+                last_message_response = supabase.table('chat_messages').select(
+                    'id, body, created_at'
+                ).eq('project_id', project_id).is_('deleted_at', 'null').order(
+                    'created_at', desc=True
+                ).limit(1).execute()
+                
+                last_message = None
+                last_message_at = None
+                last_message_preview = None
+                
+                if last_message_response.data and len(last_message_response.data) > 0:
+                    last_message = last_message_response.data[0]
+                    # Parse datetime - handle both with and without timezone
+                    created_at_str = last_message['created_at']
+                    if created_at_str.endswith('Z'):
+                        created_at_str = created_at_str.replace('Z', '+00:00')
+                    last_message_at = datetime.fromisoformat(created_at_str)
+                    # Get preview (first 100 chars)
+                    body = last_message.get('body', '')
+                    if body:
+                        last_message_preview = body[:100] + ('...' if len(body) > 100 else '')
+                    else:
+                        last_message_preview = '[File attachment]'
+                
+                # Get unread count
+                unread_response = supabase.table('chat_notifications').select('unread_count').eq(
+                    'user_id', str(user_id)
+                ).eq('chat_type', 'project').eq('reference_id', project_id).execute()
+                
+                unread_count = 0
+                if unread_response.data and len(unread_response.data) > 0:
+                    unread_count = unread_response.data[0].get('unread_count', 0) or 0
+                
+                # Get project avatar URL if available
+                avatar_url = None
+                if project.get('avatar_file_id'):
+                    avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+                
+                conversations_data.append({
+                    'project_id': project_id,
+                    'project_name': project['name'],
+                    'avatar_color': project.get('avatar_color'),
+                    'avatar_icon': project.get('avatar_icon'),
+                    'avatar_url': avatar_url,
+                    'last_message_at': last_message_at,
+                    'last_message_preview': last_message_preview,
+                    'unread_count': unread_count
+                })
+            
+            # Sort by last_message_at (newest first), projects with no messages go to end
+            conversations_data.sort(
+                key=lambda x: x['last_message_at'] if x['last_message_at'] else datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True
+            )
+            
+            # Apply pagination
+            total = len(conversations_data)
+            if offset is not None:
+                conversations_data = conversations_data[offset:]
+            if limit is not None:
+                conversations_data = conversations_data[:limit]
+            
+            return {
+                'conversations': [ProjectConversationResponse(**conv) for conv in conversations_data],
+                'total': total,
+                'limit': limit,
+                'offset': offset
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting project conversations: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get project conversations: {str(e)}"
             )
     
     def send_direct_message(

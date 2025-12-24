@@ -26,6 +26,7 @@ from app.schemas.chat import (
     NotificationSummaryResponse,
     AttachmentUploadResponse,
     AttachmentDownloadResponse,
+    ProjectConversationListResponse,
 )
 from app.services.chat import ChatService
 from app.services.files import FilesService
@@ -217,6 +218,35 @@ async def mark_project_messages_read(
         )
     
     return None
+
+
+@router.get('/projects/conversations', response_model=ProjectConversationListResponse, status_code=status.HTTP_200_OK)
+def get_project_conversations(
+    organization: any = Depends(get_active_organization),
+    limit: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0),
+):
+    """
+    Get list of all project conversations for current user
+    
+    Returns all projects where the user is a member, with:
+    - Last message preview
+    - Unread count
+    - Project info (name, avatar, etc.)
+    - Ordered by last message time (newest first)
+    
+    Requires: Organization member
+    """
+    
+    chat_service = ChatService()
+    result = chat_service.get_project_conversations(
+        UUID4(organization['member_user_id']),
+        organization['id'],
+        limit=limit,
+        offset=offset
+    )
+    
+    return ProjectConversationListResponse(**result)
 
 
 @router.get('/direct/conversations', response_model=ConversationListResponse, status_code=status.HTTP_200_OK)
