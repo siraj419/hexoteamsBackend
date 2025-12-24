@@ -179,7 +179,7 @@ class TaskService:
         attachments = []
         if task_comment_request.file_ids and len(task_comment_request.file_ids) > 0:
             for file_id in task_comment_request.file_ids:
-                attachment = self.attachment_service.add_attachment(AttachmentType.TASK_COMMENT, response.data[0]['id'], file_id)
+                attachment = self.attachment_service.add_attachment(AttachmentType.COMMENT, response.data[0]['id'], file_id)
                 attachments.append(attachment)
         
         user_timezone = self._get_user_timezone(user_id)
@@ -220,11 +220,11 @@ class TaskService:
         attachments = []
         if comment_update_request.file_ids and len(comment_update_request.file_ids) > 0:
             for file_id in comment_update_request.file_ids:
-                attachment = self.attachment_service.add_attachment(AttachmentType.TASK_COMMENT, comment_id, file_id)
+                attachment = self.attachment_service.add_attachment(AttachmentType.COMMENT, comment_id, file_id)
                 attachments.append(attachment)
         
         # Get existing attachments
-        existing_attachments = self.attachment_service.get_attachments(AttachmentType.TASK_COMMENT, comment_id)
+        existing_attachments = self.attachment_service.get_attachments(AttachmentType.COMMENT, comment_id)
         attachments.extend(existing_attachments.attachments)
         
         user_timezone = self._get_user_timezone(user_id)
@@ -260,7 +260,7 @@ class TaskService:
         
         # Delete associated attachments
         try:
-            attachments = self.attachment_service.get_attachments(AttachmentType.TASK_COMMENT, comment_id)
+            attachments = self.attachment_service.get_attachments(AttachmentType.COMMENT, comment_id)
             for attachment in attachments.attachments:
                 self.attachment_service.delete_attachment(attachment.id)
         except Exception:
@@ -1137,7 +1137,7 @@ class TaskService:
             return {}
         
         try:
-            response = supabase.table('attachments').select('id, file_id, entity_id, files(name, size_bytes, content_type)').eq('entity_type', AttachmentType.TASK_COMMENT.value).in_('entity_id', comment_ids).execute()
+            response = supabase.table('attachments').select('id, file_id, entity_id, files(name, size_bytes, content_type)').eq('entity_type', AttachmentType.COMMENT.value).in_('entity_id', comment_ids).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
