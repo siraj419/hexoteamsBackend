@@ -420,6 +420,7 @@ class FilesService:
             name=file_data.name,
             size=file_data.size,
             content_type=file_data.content_type,
+            is_deleted=file_data.is_deleted,
             file_url=file_url,
             uploaded_by=self._get_user_profile(file_data.uploaded_by),
         )
