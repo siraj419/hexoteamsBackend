@@ -329,14 +329,12 @@ async def inbox_websocket(
     await websocket.accept()
     
     connection_key = f"inbox:{org_id}:{user_id}"
-    if not hasattr(manager, 'inbox_connections'):
-        manager.inbox_connections = {}
     
     if connection_key not in manager.inbox_connections:
         manager.inbox_connections[connection_key] = []
     
     manager.inbox_connections[connection_key].append(websocket)
-    logger.info(f"User {user_id} connected to inbox for org {org_id}")
+    logger.info(f"User {user_id} connected to inbox for org {org_id}. Connection key: {connection_key}. Total inbox connections: {len(manager.inbox_connections)}")
     
     try:
         while True:

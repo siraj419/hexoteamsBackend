@@ -17,6 +17,8 @@ class ConnectionManager:
         self.dm_connections: Dict[str, Set[tuple]] = {}
         # user_id -> list of websockets (user can have multiple tabs)
         self.user_connections: Dict[str, list] = {}
+        # inbox connections: "inbox:{org_id}:{user_id}" -> list of websockets
+        self.inbox_connections: Dict[str, list] = {}
     
     async def connect_project(self, websocket: WebSocket, project_id: str, user_id: str):
         await websocket.accept()
@@ -159,21 +161,22 @@ class ConnectionManager:
     
     async def broadcast_inbox_notification(self, org_id: str, user_id: str, message: dict):
         """Broadcast inbox notification to user's connections for specific org"""
-        if not hasattr(self, 'inbox_connections'):
-            self.inbox_connections = {}
-        
         connection_key = f"inbox:{org_id}:{user_id}"
         
         if connection_key not in self.inbox_connections:
-            logger.debug(f"No inbox connections for {connection_key}")
+            logger.info(f"No active inbox connections for {connection_key}. Active connections: {list(self.inbox_connections.keys())}")
             return
         
         data = json.dumps(message)
         disconnected = []
+        connection_count = len(self.inbox_connections[connection_key])
+        
+        logger.info(f"Broadcasting inbox notification to {connection_count} connection(s) for {connection_key}")
         
         for websocket in self.inbox_connections[connection_key]:
             try:
                 await websocket.send_text(data)
+                logger.info(f"Successfully sent inbox notification to user {user_id}")
             except Exception as e:
                 logger.error(f"Failed to send inbox notification to user {user_id}: {e}")
                 disconnected.append(websocket)
