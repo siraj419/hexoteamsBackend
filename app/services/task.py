@@ -909,18 +909,29 @@ class TaskService:
             limit=limit,
         )
     
-    def get_user_assigned_tasks(
+    def get_user_tasks(
         self,
         user_id: UUID4,
         org_id: UUID4,
+        task_type: str = "all",
         search: Optional[str] = None,
         status: Optional[TaskStatus] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ):
         """
-        Get tasks assigned to the user in the active organization.
+        Get tasks for the user in the active organization.
+        Can filter by: all (assigned OR created), assigned, or created.
         Returns paginated response with total count.
+        
+        Args:
+            user_id: The user ID
+            org_id: The organization ID
+            task_type: Filter type - "all", "assigned", or "created"
+            search: Optional search term for task title
+            status: Optional task status filter
+            limit: Optional pagination limit
+            offset: Optional pagination offset
         """
         from app.schemas.tasks import TasksPaginatedResponse
         
@@ -941,14 +952,106 @@ class TaskService:
                 detail=f"Failed to get projects: {e}"
             )
         
-        # Query tasks assigned to user in these projects
-        query = supabase.table('tasks').select('*', count='exact').eq('assignee_id', str(user_id)).in_('project_id', project_ids).is_('parent_id', 'null').order('created_at', desc=True)
+        # Build query based on task_type
+        query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null')
         
+        # Apply task_type filter
+        if task_type == "assigned":
+            query = query.eq('assignee_id', str(user_id))
+        elif task_type == "created":
+            query = query.eq('created_by', str(user_id))
+        elif task_type == "all":
+            # Get tasks where user is either assignee OR creator
+            # We'll use OR condition: (assignee_id = user_id OR created_by = user_id)
+            # Since Supabase doesn't support OR directly, we'll fetch both and combine
+            assigned_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('assignee_id', str(user_id))
+            created_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('created_by', str(user_id))
+            
+            if status:
+                assigned_query = assigned_query.eq('status', status.value)
+                created_query = created_query.eq('status', status.value)
+            if search:
+                assigned_query = assigned_query.ilike('title', f'%{search}%')
+                created_query = created_query.ilike('title', f'%{search}%')
+            
+            # Execute both queries
+            try:
+                assigned_response = assigned_query.execute()
+                created_response = created_query.execute()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to get tasks: {e}"
+                )
+            
+            # Combine and deduplicate tasks
+            all_tasks = {}
+            if assigned_response.data:
+                for task in assigned_response.data:
+                    all_tasks[str(task['id'])] = task
+            if created_response.data:
+                for task in created_response.data:
+                    all_tasks[str(task['id'])] = task
+            
+            # Convert to list and sort by created_at
+            tasks_list = list(all_tasks.values())
+            tasks_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            
+            # Apply pagination manually
+            total_count = len(tasks_list)
+            if offset is not None and limit is not None:
+                tasks_list = tasks_list[offset:offset + limit]
+            elif offset is not None:
+                tasks_list = tasks_list[offset:]
+            elif limit is not None:
+                tasks_list = tasks_list[:limit]
+            
+            if not tasks_list:
+                return TasksPaginatedResponse(
+                    tasks=[],
+                    total=total_count,
+                    offset=offset,
+                    limit=limit,
+                )
+            
+            # Get assignee info
+            all_assignee_ids = set()
+            for task in tasks_list:
+                if task.get('assignee_id'):
+                    all_assignee_ids.add(task['assignee_id'])
+            
+            assignee_cache = {}
+            if all_assignee_ids:
+                assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
+            
+            tasks = [TaskResponse(
+                id=task['id'],
+                title=task['title'],
+                content=task['content'],
+                status=task['status'],
+                due_date=task['due_date'],
+                assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
+            ) for task in tasks_list]
+            
+            return TasksPaginatedResponse(
+                tasks=tasks,
+                total=total_count,
+                offset=offset,
+                limit=limit,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="task_type must be 'all', 'assigned', or 'created'"
+            )
+        
+        # For assigned or created, continue with single query
         if status:
             query = query.eq('status', status.value)
         if search:
             query = query.ilike('title', f'%{search}%')
         
+        query = query.order('created_at', desc=True)
         limit, offset, query = apply_pagination(query, limit, offset)
         
         try:
@@ -956,7 +1059,7 @@ class TaskService:
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get assigned tasks: {e}"
+                detail=f"Failed to get tasks: {e}"
             )
         
         total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0

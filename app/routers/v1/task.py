@@ -361,18 +361,23 @@ def get_task_comments(
 @router.get('/my-tasks', response_model=TasksPaginatedResponse, status_code=status.HTTP_200_OK)
 def get_my_tasks(
     active_organization: Any = Depends(get_active_organization),
+    task_type: str = Query("all", description="Filter tasks: 'all' (assigned OR created), 'assigned', or 'created'"),
     search: Optional[str] = None,
     status: Optional[TaskStatus] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
 ):
     """
-    Get tasks assigned to the current user in the active organization.
+    Get tasks for the current user in the active organization.
     
-    Returns paginated response with tasks assigned to the authenticated user.
+    Returns paginated response with tasks based on the task_type filter.
     Only includes tasks from projects in the user's active organization.
     
     Query params:
+        - task_type: str (default: "all") - Filter type:
+            - "all": Tasks assigned to user OR created by user
+            - "assigned": Only tasks assigned to user
+            - "created": Only tasks created by user
         - search: Optional[str] - Search tasks by title
         - status: Optional[TaskStatus] - Filter by task status
         - limit: Optional[int] - Number of tasks per page
@@ -382,9 +387,10 @@ def get_my_tasks(
         TasksPaginatedResponse with tasks, total, offset, and limit
     """
     task_service = TaskService()
-    return task_service.get_user_assigned_tasks(
+    return task_service.get_user_tasks(
         user_id=UUID4(active_organization['member_user_id']),
         org_id=UUID4(active_organization['id']),
+        task_type=task_type,
         search=search,
         status=status,
         limit=limit,
