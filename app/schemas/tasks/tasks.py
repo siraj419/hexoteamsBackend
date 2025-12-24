@@ -128,7 +128,7 @@ class TaskGetCommentsPaginatedResponse(BaseModel):
     limit: Optional[int] = None
 
 class TaskSubtasksPaginatedResponse(BaseModel):
-    subtasks: List[TaskResponse]
+    subtasks: List['TaskResponse']
     total: int
     offset: Optional[int] = None
     limit: Optional[int] = None
