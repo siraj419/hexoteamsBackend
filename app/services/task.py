@@ -1,5 +1,6 @@
 import re
 import logging
+from uuid import UUID
 from fastapi import HTTPException, status, UploadFile
 from pydantic import UUID4
 from supabase_auth.errors import AuthApiError
@@ -1269,7 +1270,7 @@ class TaskService:
             return {}
         
         try:
-            user_id_strings = [str(uid) if isinstance(uid, UUID4) else uid for uid in user_ids]
+            user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in user_ids]
             response = supabase.table('profiles').select('user_id, display_name, avatar_file_id').in_('user_id', user_id_strings).execute()
         except AuthApiError as e:
             raise HTTPException(
