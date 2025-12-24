@@ -10,6 +10,7 @@ from .teams import router as teams_router
 from .websocket import router as websocket_router
 from .time_log import router as time_log_router
 from .inbox import router as inbox_router
+from .misc import router as misc_router
 
 v1_router = APIRouter()
 
@@ -24,6 +25,7 @@ v1_router.include_router(teams_router, prefix="/teams", tags=["Teams"])
 v1_router.include_router(websocket_router, prefix="/ws", tags=["WebSocket"])
 v1_router.include_router(time_log_router, prefix="/time-logs", tags=["Time Logs"])
 v1_router.include_router(inbox_router, prefix="/inbox", tags=["Inbox"])
+v1_router.include_router(misc_router, prefix="/misc", tags=["Misc"])
 __all__ = [
     "v1_router"
 ]
