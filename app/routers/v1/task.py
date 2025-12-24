@@ -29,7 +29,7 @@ from app.schemas.tasks import (
     TaskLinkUpdateRequest,
 )
 
-from app.routers.deps import get_project_member
+from app.routers.deps import get_project_member, verify_task_delete_permission
 from app.services.activity import ActivityService, ActivityType
 from app.services.files import FilesService
 from app.schemas.activities import ActivityGetPaginatedResponse
@@ -405,3 +405,32 @@ def list_subtasks(
         limit=limit,
         offset=offset,
     )
+
+@router.delete('/{task_id}', status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(
+    task_id: UUID4,
+    permission: dict = Depends(verify_task_delete_permission),
+):
+    """
+    Delete a task.
+    
+    Only the following users can delete a task:
+    - The user who created the task
+    - Organization owners
+    - Organization admins
+    
+    Requires project_id as query parameter to verify project membership.
+    
+    Query params:
+        - project_id: UUID4 (required) - The project ID to verify membership
+    
+    Example:
+        DELETE /api/v1/tasks/{task_id}?project_id={project_id}
+    """
+    task_service = TaskService()
+    task_service.delete_task(
+        task_id=UUID4(permission['task_id']),
+        user_id=UUID4(permission['user_id']),
+        force_delete=permission.get('is_org_admin', False)
+    )
+    return None

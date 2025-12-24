@@ -253,4 +253,120 @@ def verify_organization_membership(organization_id: UUID4, user: any = Depends(g
         'organization_id': str(organization_id),
         'role': member.get('role')
     }
+
+
+def verify_task_delete_permission(
+    task_id: UUID4,
+    project_id: UUID4 = Query(...),
+    user: any = Depends(get_current_user)
+) -> dict:
+    """
+    Verify user can delete the task:
+    - User is the task creator, OR
+    - User is organization owner/admin
+    
+    Requires project_id as query param to verify project membership
+    """
+    # First verify user is a project member
+    try:
+        member_response = supabase.table('project_members').select('*').eq(
+            'project_id', str(project_id)
+        ).eq('user_id', user.id).execute()
+        
+        if not member_response.data or len(member_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User is not a member of this project"
+            )
+    except HTTPException:
+        raise
+    except AuthApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to verify project membership: {e}"
+        )
+    
+    # Get task information and project's org_id
+    try:
+        task_response = supabase.table('tasks').select('created_by, project_id').eq(
+            'id', str(task_id)
+        ).execute()
+        
+        if not task_response.data or len(task_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found"
+            )
+        
+        task = task_response.data[0]
+        task_creator_id = task.get('created_by')
+        task_project_id = task.get('project_id')
+        
+        # Verify task belongs to the specified project
+        if str(task_project_id) != str(project_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Task does not belong to the specified project"
+            )
+        
+    except HTTPException:
+        raise
+    except AuthApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get task information: {e}"
+        )
+    
+    # Check if user is the task creator
+    if str(task_creator_id) == str(user.id):
+        return {
+            'user_id': user.id,
+            'task_id': str(task_id),
+            'can_delete': True,
+            'is_creator': True,
+            'is_org_admin': False
+        }
+    
+    # Check if user is organization admin/owner
+    try:
+        project_response = supabase.table('projects').select('org_id').eq(
+            'id', str(project_id)
+        ).execute()
+        
+        if not project_response.data or len(project_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found"
+            )
+        
+        org_id = project_response.data[0]['org_id']
+        
+        org_member_response = supabase.table('organization_members').select('role').eq(
+            'org_id', str(org_id)
+        ).eq('user_id', user.id).execute()
+        
+        if org_member_response.data and len(org_member_response.data) > 0:
+            user_role = org_member_response.data[0].get('role')
+            
+            if user_role in [OrganizationMemberRole.OWNER.value, OrganizationMemberRole.ADMIN.value]:
+                return {
+                    'user_id': user.id,
+                    'task_id': str(task_id),
+                    'can_delete': True,
+                    'is_creator': False,
+                    'is_org_admin': True
+                }
+    except HTTPException:
+        raise
+    except AuthApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to verify organization role: {e}"
+        )
+    
+    # User doesn't have permission
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Only the task creator or organization admins/owners can delete this task"
+    )
  

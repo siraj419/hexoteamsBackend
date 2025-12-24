@@ -789,7 +789,19 @@ class TaskService:
         self,
         task_id: UUID4,
         user_id: UUID4,
+        force_delete: bool = False,
     ) -> bool:
+        """
+        Delete a task.
+        
+        Args:
+            task_id: ID of the task to delete
+            user_id: ID of the user attempting to delete
+            force_delete: If True, bypasses creator check (for org admins/owners)
+        
+        Returns:
+            bool: True if deletion was successful
+        """
         # Get project_id before deleting
         project_id = None
         try:
@@ -800,7 +812,11 @@ class TaskService:
             pass
         
         try:
-            response = supabase.table('tasks').delete().eq('id', task_id).eq('created_by', user_id).execute()
+            # If force_delete is True (org admin/owner), don't filter by created_by
+            if force_delete:
+                response = supabase.table('tasks').delete().eq('id', str(task_id)).execute()
+            else:
+                response = supabase.table('tasks').delete().eq('id', str(task_id)).eq('created_by', str(user_id)).execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -809,8 +825,8 @@ class TaskService:
         
         if not response.data or len(response.data) == 0:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to delete task"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found or already deleted"
             )
         
         # Invalidate project summary cache
