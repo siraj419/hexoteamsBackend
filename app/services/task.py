@@ -853,7 +853,7 @@ class TaskService:
         """
         from app.schemas.tasks import TaskSubtasksPaginatedResponse
         
-        query = supabase.table('tasks').select('*', count='exact').eq('parent_id', str(task_id))
+        query = supabase.table('tasks').select('*', count='exact').eq('parent_id', str(task_id)).order('created_at', desc=True)
         
         if user_id:
             query = query.eq('created_by', str(user_id))
