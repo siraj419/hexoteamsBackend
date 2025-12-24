@@ -177,3 +177,10 @@ class TaskCreateAttachmentRequest(BaseModel):
 
 class TaskLinkUpdateRequest(LinkUpdateRequest):
     pass
+
+class TaskMinimalResponse(BaseModel):
+    id: UUID4
+    title: str
+
+class ProjectTasksMinimalResponse(BaseModel):
+    tasks: List[TaskMinimalResponse]

@@ -21,6 +21,7 @@ from app.schemas.tasks import (
     TaskChangeStatusRequest,
     TaskUpdateDetailsRequest,
     TaskUserInfoResponse,
+    ProjectTasksMinimalResponse,
 )
 from app.services.task import (
     TaskService,
@@ -421,6 +422,19 @@ def list_tasks(
         limit=limit,
         offset=offset,
     )
+
+@router.get('/minimal', response_model=ProjectTasksMinimalResponse, status_code=status.HTTP_200_OK)
+def get_project_tasks_minimal(
+    project_id: UUID4 = Query(...),
+    member: Any = Depends(get_project_member),
+):
+    """
+    Get all tasks (including subtasks) for a project with minimal data (id and title only).
+    Used for time log task selection.
+    """
+    task_service = TaskService()
+    tasks = task_service.get_project_tasks_minimal(project_id)
+    return ProjectTasksMinimalResponse(tasks=tasks)
 
 @router.get('/{task_id}/subtasks', response_model=TaskSubtasksPaginatedResponse, status_code=status.HTTP_200_OK)
 def list_subtasks(

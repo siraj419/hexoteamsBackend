@@ -361,6 +361,32 @@ class TaskService:
             assignee=self._get_user_info(task['assignee_id']) if task['assignee_id'] else None,
         ) for task in response.data]
     
+    def get_project_tasks_minimal(
+        self,
+        project_id: UUID4,
+    ) -> List['TaskMinimalResponse']:
+        """
+        Get all tasks (including subtasks) for a project with minimal data (id and title only).
+        Used for time log task selection.
+        """
+        from app.schemas.tasks import TaskMinimalResponse
+        
+        try:
+            response = supabase.table('tasks').select('id, title').eq('project_id', str(project_id)).order('created_at', desc=False).execute()
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get project tasks: {e}"
+            )
+        
+        if not response.data:
+            return []
+        
+        return [TaskMinimalResponse(
+            id=task['id'],
+            title=task['title'],
+        ) for task in response.data]
+    
     def change_task_assignee(
         self,
         task_id: UUID4,
