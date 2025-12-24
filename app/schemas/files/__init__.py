@@ -1,5 +1,5 @@
 from .files import (
-    FileBaseResponse, FileBaseResponseWithUploaderId, FileResponseWithUser, FileGetResponseWithUser, FileGetPaginatedResponseWithUploaders, FileUploadedByUser, FileUploadedByUserResponse, FileUploadedByUserGetResponse
+    FileBaseResponse, FileBaseResponseWithUploaderId, FileResponseWithUser, FileGetResponseWithUser, FileGetPaginatedResponseWithUploaders, FileUploadedByUser, FileUploadedByUserResponse, FileUploadedByUserGetResponse, FileUpdateRequest
 )
 
 __all__ = [
@@ -11,4 +11,5 @@ __all__ = [
     "FileUploadedByUser",
     "FileUploadedByUserResponse",
     "FileUploadedByUserGetResponse",
+    "FileUpdateRequest",
 ]

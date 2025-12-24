@@ -38,3 +38,7 @@ class FileGetPaginatedResponseWithUploaders(BaseModel):
     total: int
     offset: Optional[int] = None
     limit: Optional[int] = None
+
+class FileUpdateRequest(BaseModel):
+    file_name: Optional[str] = None
+    content_type: Optional[str] = None

@@ -156,6 +156,59 @@ class FilesService:
         
         return response.data[0]
 
+    def update_file_metadata(
+        self,
+        file_id: UUID4,
+        file_name: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> FileBaseResponse:
+        """
+        Update file metadata (name and/or content_type) without uploading a new file.
+        """
+        updates = {}
+        
+        if file_name is not None:
+            updates["name"] = file_name
+        
+        if content_type is not None:
+            updates["content_type"] = content_type
+        
+        if not updates:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one field (file_name or content_type) must be provided"
+            )
+        
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        try:
+            response = supabase.table("files").update(updates).eq("id", str(file_id)).execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update file metadata: {e}"
+            )
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
+        file_data = response.data[0]
+        
+        # Get user profile for response
+        uploaded_by = self._get_user_profile(UUID4(file_data["uploaded_by"]))
+        
+        return FileBaseResponse(
+            id=UUID4(file_data["id"]),
+            name=file_data["name"],
+            size=calculate_file_size(file_data["size_bytes"]),
+            uploaded_by=UUID4(file_data["uploaded_by"]),
+            is_deleted=file_data.get("is_deleted", False),
+            content_type=file_data["content_type"],
+        )
+    
     def update_file_project_id(self, file_id: UUID4, project_id: UUID4) -> Dict[str, Any]:
         try:
             response = supabase.table("files").update({
