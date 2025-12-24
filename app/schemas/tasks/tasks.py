@@ -184,3 +184,9 @@ class TaskMinimalResponse(BaseModel):
 
 class ProjectTasksMinimalResponse(BaseModel):
     tasks: List[TaskMinimalResponse]
+
+class TaskDepthResponse(BaseModel):
+    task_id: UUID4
+    depth_level: int
+    is_innermost: bool
+    max_allowed_depth: int

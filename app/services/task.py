@@ -1687,3 +1687,63 @@ class TaskService:
             return None
         
         return UUID4(parent_id)
+    
+    def get_task_depth_info(
+        self,
+        task_id: UUID4,
+        project_id: Optional[UUID4] = None,
+    ) -> 'TaskDepthResponse':
+        """
+        Get the depth level of a task and determine if it's an innermost task.
+        An innermost task is one that has reached the maximum allowed depth and cannot have subtasks.
+        
+        Args:
+            task_id: The task ID to check
+            project_id: Optional project ID to verify the task belongs to the project
+        """
+        from app.schemas.tasks import TaskDepthResponse
+        
+        # First, verify the task exists
+        try:
+            task_response = supabase.table('tasks').select('id, parent_id, project_id').eq('id', str(task_id)).execute()
+            if not task_response.data or len(task_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Task not found"
+                )
+            
+            # Verify task belongs to the project if project_id is provided
+            if project_id and str(task_response.data[0]['project_id']) != str(project_id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Task does not belong to the specified project"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get task: {e}"
+            )
+        
+        # Calculate depth by traversing up the parent chain
+        depth = 0
+        current_task_id = task_id
+        
+        while depth < settings.MAX_SUBTASK_DEPTH:
+            parent_id = self._get_parent_id('tasks', current_task_id)
+            if parent_id is None:
+                # Reached the root (no parent), this is the current depth
+                break
+            depth += 1
+            current_task_id = parent_id
+        
+        # Check if task is innermost (at maximum depth)
+        is_innermost = depth >= settings.MAX_SUBTASK_DEPTH
+        
+        return TaskDepthResponse(
+            task_id=task_id,
+            depth_level=depth,
+            is_innermost=is_innermost,
+            max_allowed_depth=settings.MAX_SUBTASK_DEPTH,
+        )

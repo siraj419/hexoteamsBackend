@@ -22,6 +22,7 @@ from app.schemas.tasks import (
     TaskUpdateDetailsRequest,
     TaskUserInfoResponse,
     ProjectTasksMinimalResponse,
+    TaskDepthResponse,
 )
 from app.services.task import (
     TaskService,
@@ -435,6 +436,30 @@ def get_project_tasks_minimal(
     task_service = TaskService()
     tasks = task_service.get_project_tasks_minimal(project_id)
     return ProjectTasksMinimalResponse(tasks=tasks)
+
+@router.get('/{task_id}/depth', response_model=TaskDepthResponse, status_code=status.HTTP_200_OK)
+def get_task_depth(
+    task_id: UUID4,
+    project_id: UUID4 = Query(...),
+    member: Any = Depends(get_project_member),
+):
+    """
+    Get the depth level of a task and determine if it's an innermost task.
+    
+    An innermost task is one that has reached the maximum allowed depth and cannot have subtasks.
+    
+    Query params:
+        - project_id: UUID4 (required) - The project ID to verify membership
+    
+    Returns:
+        TaskDepthResponse with:
+        - task_id: The task ID
+        - depth_level: Current depth level (0 = root, 1 = first level subtask, etc.)
+        - is_innermost: True if task is at maximum depth and cannot have subtasks
+        - max_allowed_depth: Maximum allowed depth from configuration
+    """
+    task_service = TaskService()
+    return task_service.get_task_depth_info(task_id, project_id=project_id)
 
 @router.get('/{task_id}/subtasks', response_model=TaskSubtasksPaginatedResponse, status_code=status.HTTP_200_OK)
 def list_subtasks(
