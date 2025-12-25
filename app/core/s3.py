@@ -531,11 +531,40 @@ class S3Service:
             
             client_method = method_map.get(http_method.upper(), 'get_object')
             
-            url = self.s3_client.generate_presigned_url(
-                ClientMethod=client_method,
-                Params={'Bucket': bucket, 'Key': key},
-                ExpiresIn=expiration
-            )
+            # For MinIO, ensure we use query-string-only authentication
+            # by creating a client with proper config if needed
+            is_minio = settings.S3_ENDPOINT_URL is not None and settings.S3_ENDPOINT_URL != ''
+            
+            if is_minio:
+                # Create a temporary client with proper config for presigned URLs
+                # This ensures we only use query string authentication, not headers
+                presigned_config = BotoConfig(
+                    signature_version='s3v4',  # Explicitly use s3v4 for presigned URLs
+                    s3={'addressing_style': 'path'}
+                )
+                
+                presigned_client_params = {
+                    'aws_access_key_id': settings.AWS_ACCESS_KEY_ID,
+                    'aws_secret_access_key': settings.AWS_SECRET_ACCESS_KEY,
+                    'config': presigned_config,
+                    'endpoint_url': settings.S3_ENDPOINT_URL,
+                    'use_ssl': settings.S3_USE_SSL,
+                    'region_name': settings.AWS_REGION
+                }
+                
+                presigned_client = boto3.client('s3', **presigned_client_params)
+                
+                url = presigned_client.generate_presigned_url(
+                    ClientMethod=client_method,
+                    Params={'Bucket': bucket, 'Key': key},
+                    ExpiresIn=expiration
+                )
+            else:
+                url = self.s3_client.generate_presigned_url(
+                    ClientMethod=client_method,
+                    Params={'Bucket': bucket, 'Key': key},
+                    ExpiresIn=expiration
+                )
             
             return url
         except ClientError as e:
