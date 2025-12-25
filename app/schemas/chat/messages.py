@@ -193,6 +193,14 @@ class AttachmentDownloadResponse(BaseModel):
     expires_at: datetime
 
 
+class ChatAttachmentDetailsResponse(BaseModel):
+    attachment_id: UUID4
+    file_name: str
+    file_size: str
+    file_type: str
+    thumbnail_url: Optional[str] = None
+
+
 class SearchResultResponse(BaseModel):
     message_id: UUID4
     chat_type: ChatType

@@ -11,6 +11,7 @@ from .messages import (
     AttachmentResponse,
     AttachmentUploadResponse,
     AttachmentDownloadResponse,
+    ChatAttachmentDetailsResponse,
     SearchResultResponse,
     MessageType,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "AttachmentResponse",
     "AttachmentUploadResponse",
     "AttachmentDownloadResponse",
+    "ChatAttachmentDetailsResponse",
     "SearchResultResponse",
     "MessageType",
     "ConversationCreate",

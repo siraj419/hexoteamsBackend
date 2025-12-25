@@ -26,6 +26,7 @@ from app.schemas.chat import (
     NotificationSummaryResponse,
     AttachmentUploadResponse,
     AttachmentDownloadResponse,
+    ChatAttachmentDetailsResponse,
     ProjectConversationListResponse,
 )
 from app.services.chat import ChatService
@@ -548,6 +549,34 @@ async def upload_chat_attachment(
         )
 
 
+@router.get('/attachments/{attachment_id}', response_model=ChatAttachmentDetailsResponse, status_code=status.HTTP_200_OK)
+def get_chat_attachment_details(
+    attachment_id: UUID4,
+    organization: any = Depends(get_active_organization),
+):
+    """
+    Get chat attachment details
+    
+    Requires: Message participant or attachment uploader
+    Returns: Attachment metadata including file name, size, type, and thumbnail URL
+    """
+    files_service = FilesService()
+    
+    try:
+        result = files_service.get_chat_attachment_details(
+            attachment_id,
+            UUID4(organization['member_user_id'])
+        )
+        return ChatAttachmentDetailsResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get attachment details: {str(e)}"
+        )
+
+
 @router.get('/attachments/{attachment_id}/download', response_model=AttachmentDownloadResponse, status_code=status.HTTP_200_OK)
 def get_attachment_download_url(
     attachment_id: UUID4,
@@ -573,6 +602,34 @@ def get_attachment_download_url(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get download URL: {str(e)}"
+        )
+
+
+@router.delete('/attachments/{attachment_id}', status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat_attachment(
+    attachment_id: UUID4,
+    organization: any = Depends(get_active_organization),
+):
+    """
+    Delete a chat attachment by ID
+    
+    Requires: Attachment uploader
+    Security: Only the user who uploaded the attachment can delete it
+    """
+    files_service = FilesService()
+    
+    try:
+        files_service.delete_chat_attachment(
+            attachment_id,
+            UUID4(organization['member_user_id'])
+        )
+        return None
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete attachment: {str(e)}"
         )
 
 

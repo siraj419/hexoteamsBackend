@@ -621,6 +621,75 @@ class FilesService:
                 detail=f"Failed to upload chat attachment: {str(e)}"
             )
     
+    def get_chat_attachment_details(
+        self,
+        attachment_id: UUID4,
+        user_id: UUID4
+    ) -> Dict[str, Any]:
+        """
+        Get chat attachment details
+        
+        Args:
+            attachment_id: The attachment ID
+            user_id: The requesting user ID
+            
+        Returns:
+            Dict with attachment details (attachment_id, file_name, file_size, file_type, thumbnail_url)
+        """
+        try:
+            attachment_response = supabase.table('chat_attachments').select('*').eq(
+                'id', str(attachment_id)
+            ).execute()
+            
+            if not attachment_response.data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Attachment not found"
+                )
+            
+            attachment = attachment_response.data[0]
+            
+            # Verify user has access to the attachment
+            # If attachment is not yet linked to a message, check if user is the uploader
+            if not attachment.get('message_id'):
+                if attachment.get('uploaded_by') != str(user_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied to this attachment"
+                    )
+            else:
+                # If linked to a message, verify access through message
+                self._verify_attachment_access(attachment, user_id)
+            
+            # Generate thumbnail URL if thumbnail exists
+            thumbnail_url = None
+            if attachment.get('thumbnail_path'):
+                try:
+                    thumbnail_url = self.s3_service.generate_presigned_url(
+                        attachment['thumbnail_path'],
+                        expiration=3600  # 1 hour
+                    )
+                except (S3ServiceException, Exception) as e:
+                    logger.warning(f"Failed to generate thumbnail URL: {str(e)}")
+                    pass
+            
+            return {
+                'attachment_id': attachment_id,
+                'file_name': attachment['file_name'],
+                'file_size': calculate_file_size(attachment['file_size']),
+                'file_type': attachment['file_type'],
+                'thumbnail_url': thumbnail_url
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get attachment details: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get attachment details. Please try again later."
+            )
+    
     def get_chat_attachment_download_url(
         self,
         attachment_id: UUID4,
