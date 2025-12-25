@@ -701,6 +701,9 @@ class ChatService:
                     if created_at_str.endswith('Z'):
                         created_at_str = created_at_str.replace('Z', '+00:00')
                     last_message_at = datetime.fromisoformat(created_at_str)
+                    # Ensure timezone-aware (if naive, assume UTC)
+                    if last_message_at.tzinfo is None:
+                        last_message_at = last_message_at.replace(tzinfo=timezone.utc)
                     # Get preview (first 100 chars)
                     body = last_message.get('body', '')
                     if body:
@@ -734,10 +737,17 @@ class ChatService:
                 })
             
             # Sort by last_message_at (newest first), projects with no messages go to end
-            conversations_data.sort(
-                key=lambda x: x['last_message_at'] if x['last_message_at'] else datetime.min.replace(tzinfo=timezone.utc),
-                reverse=True
-            )
+            # Ensure all datetimes are timezone-aware for comparison
+            def get_sort_key(x):
+                if x['last_message_at'] is None:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+                dt = x['last_message_at']
+                # Ensure timezone-aware
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            
+            conversations_data.sort(key=get_sort_key, reverse=True)
             
             # Apply pagination
             total = len(conversations_data)
