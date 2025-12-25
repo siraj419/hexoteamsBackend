@@ -10,7 +10,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:8002", "http://localhost:3000", "https://hex-teams-frontend.vercel.app"],
+    allow_origins=["http://localhost:8080", "http://localhost:8002", "http://localhost:3000", "https://hex-teams-frontend.vercel.app", "http://194.195.119.112:8080"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
