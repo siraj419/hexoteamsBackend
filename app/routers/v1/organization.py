@@ -107,6 +107,19 @@ def change_organization_avatar(
     organization_service = OrganizationService()
     return organization_service.change_organization_avatar(organization_id, admin_or_owner['user_id'], file)
 
+@router.delete("/{organization_id}/avatar", status_code=status.HTTP_204_NO_CONTENT)
+def delete_organization_avatar(
+    organization_id: UUID4,
+    admin_or_owner: any = Depends(get_organization_admin_or_owner)
+):
+    """
+        Delete the avatar of a specific organization for the organization admin or owner
+        This will permanently delete the avatar file from S3 and remove the reference from the organization
+    """
+    organization_service = OrganizationService()
+    organization_service.delete_organization_avatar(organization_id)
+    return None
+
 @router.put("/{organization_id}", response_model=OrganizationUpdateResponse, status_code=status.HTTP_200_OK)
 def update_organization(
     organization_id: UUID4,

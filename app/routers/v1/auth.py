@@ -23,8 +23,11 @@ from app.schemas.auth import (
     OAuthInitiateResponse
 )
 from app.services.auth import AuthService
+from app.services.files import FilesService
 from app.routers.deps import get_current_user
 from app.utils.redis_cache import UserMeCache
+from app.core import supabase
+from pydantic import UUID4
 
 router = APIRouter()
 
@@ -87,7 +90,7 @@ def reset_password(auth_request: AuthResetPasswordRequest, response: Response):
 @router.get("/me", response_model=User, status_code=status.HTTP_200_OK)
 def get_me(user: any = Depends(get_current_user)):
     """
-        Get the current user
+        Get the current user from profiles table
     """
     user_id_str = str(user.id)
     
@@ -95,24 +98,80 @@ def get_me(user: any = Depends(get_current_user)):
     if cached_user:
         return User(**cached_user)
     
-    display_name = (
-        user.user_metadata.get('display_name') or
-        user.user_metadata.get('name') or
-        user.user_metadata.get('full_name') or
-        user.email.split('@')[0] if user.email else 'User'
-    )
-    
-    user_response = User(
-        id=user.id,
-        display_name=display_name,
-        email=user.email,
-        created_at=user.created_at,
-        updated_at=user.updated_at
-    )
-    
-    UserMeCache.set_user(user_id_str, user_response.model_dump(mode='json'))
-    
-    return user_response
+    # Fetch user profile from profiles table
+    try:
+        profile_response = supabase.table('profiles').select(
+            'display_name, email, timezone, avatar_file_id, browser_notifications'
+        ).eq('user_id', user_id_str).execute()
+        
+        if not profile_response.data or len(profile_response.data) == 0:
+            # Fallback to user data if profile doesn't exist
+            display_name = (
+                user.user_metadata.get('display_name') or
+                user.user_metadata.get('name') or
+                user.user_metadata.get('full_name') or
+                user.email.split('@')[0] if user.email else 'User'
+            )
+            
+            user_response = User(
+                id=user.id,
+                display_name=display_name,
+                email=user.email,
+                timezone='UTC',
+                avatar_url=None,
+                browser_notifications=True,
+                created_at=user.created_at,
+                updated_at=user.updated_at
+            )
+        else:
+            profile = profile_response.data[0]
+            
+            # Get avatar URL if avatar_file_id exists
+            avatar_url = None
+            if profile.get('avatar_file_id'):
+                try:
+                    files_service = FilesService()
+                    avatar_url = files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                except Exception:
+                    # If avatar file doesn't exist or can't be accessed, set to None
+                    avatar_url = None
+            
+            user_response = User(
+                id=user.id,
+                display_name=profile['display_name'],
+                email=profile['email'],
+                timezone=profile.get('timezone', 'UTC'),
+                avatar_url=avatar_url,
+                browser_notifications=profile.get('browser_notifications', True),
+                created_at=user.created_at,
+                updated_at=user.updated_at
+            )
+        
+        UserMeCache.set_user(user_id_str, user_response.model_dump(mode='json'))
+        
+        return user_response
+        
+    except Exception as e:
+        # Fallback to user data if profile fetch fails
+        display_name = (
+            user.user_metadata.get('display_name') or
+            user.user_metadata.get('name') or
+            user.user_metadata.get('full_name') or
+            user.email.split('@')[0] if user.email else 'User'
+        )
+        
+        user_response = User(
+            id=user.id,
+            display_name=display_name,
+            email=user.email,
+            timezone='UTC',
+            avatar_url=None,
+            browser_notifications=True,
+            created_at=user.created_at,
+            updated_at=user.updated_at
+        )
+        
+        return user_response
 
 @router.post("/change-password", response_model=AuthChangePasswordResponse, status_code=status.HTTP_200_OK)
 def change_password(auth_request: AuthChangePasswordRequest, user: any = Depends(get_current_user)):

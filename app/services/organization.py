@@ -19,6 +19,9 @@ from app.utils import random_color, random_icon
 from app.services.files import FilesService
 from app.core import settings
 from app.utils.redis_cache import ActiveOrganizationCache
+import logging
+
+logger = logging.getLogger(__name__)
 
 class OrganizationService:
     def __init__(self):
@@ -234,6 +237,74 @@ class OrganizationService:
             )
         
         return OrganizationChangeAvatarResponse(avatar_url=avatar_url)
+    
+    def delete_organization_avatar(
+        self,
+        organization_id: UUID4
+    ) -> bool:
+        """
+        Delete the organization's avatar
+        
+        Args:
+            organization_id: The organization ID
+            
+        Returns:
+            bool: True if successful
+            
+        Raises:
+            HTTPException: If organization not found or deletion fails
+        """
+        try:
+            # Get the organization to find the avatar_file_id
+            org_response = supabase.table('organizations').select('avatar_file_id').eq(
+                'id', str(organization_id)
+            ).execute()
+            
+            if not org_response.data or len(org_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Organization not found"
+                )
+            
+            avatar_file_id = org_response.data[0].get('avatar_file_id')
+            
+            # Delete the file permanently from S3 if it exists
+            if avatar_file_id:
+                try:
+                    self.files_service.delete_file_permanently(UUID4(avatar_file_id))
+                except HTTPException as e:
+                    # Log but don't fail if file deletion fails (file might already be deleted)
+                    logger.warning(f"Failed to delete avatar file {avatar_file_id} from S3: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Unexpected error deleting avatar file {avatar_file_id}: {str(e)}")
+            
+            # Update organization to remove avatar_file_id reference
+            try:
+                response = supabase.table('organizations').update({
+                    'avatar_file_id': None,
+                    'updated_at': datetime.now(timezone.utc).isoformat(),
+                }).eq('id', str(organization_id)).execute()
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to delete organization avatar: {e}"
+                )
+            
+            if not response.data or len(response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Organization not found"
+                )
+            
+            return True
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete organization avatar: {str(e)}"
+            )
     
     def update_organization(
         self,

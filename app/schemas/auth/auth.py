@@ -59,6 +59,9 @@ class User(BaseModel):
     id: str
     display_name: str
     email: EmailStr
+    timezone: str
+    avatar_url: Optional[str] = None
+    browser_notifications: bool
     created_at: datetime
     updated_at: datetime
 

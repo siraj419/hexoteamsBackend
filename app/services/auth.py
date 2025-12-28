@@ -12,6 +12,7 @@ import httpx
 from app.core import supabase, settings
 from app.services.files import FilesService
 from app.services.oauth import OAuthService
+from app.utils.redis_cache import UserMeCache
 from app.schemas.auth import (
     AuthLoginRequest,
     AuthLoginResponse,
@@ -313,6 +314,9 @@ class AuthService:
             except AuthApiError as e:
                 pass
         
+        # Invalidate user cache since profile was updated
+        UserMeCache.delete_user(str(user.id))
+        
         return AuthUpdateProfileResponse(
             message="Profile updated successfully"
         )
@@ -384,6 +388,9 @@ class AuthService:
                 detail="Profile not found"
             )
         
+        # Invalidate user cache since avatar was changed
+        UserMeCache.delete_user(str(user.id))
+        
         return AuthChangeAvatarResponse(avatar_url=avatar_url)
 
     def remove_avatar(self, user: any) -> AuthRemoveAvatarResponse:
@@ -430,6 +437,9 @@ class AuthService:
             self.files_service.delete_file_permanently(UUID4(avatar_file_id))
         except Exception as e:
             pass
+        
+        # Invalidate user cache since avatar was removed
+        UserMeCache.delete_user(str(user.id))
         
         return AuthRemoveAvatarResponse(
             message="Avatar removed successfully"
