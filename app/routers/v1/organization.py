@@ -105,7 +105,7 @@ def change_organization_avatar(
         Change the avatar of a specific organization for the organization admin or owner
     """
     organization_service = OrganizationService()
-    return organization_service.change_organization_avatar(organization_id, admin_or_owner['user_id'], file)
+    return organization_service.change_organization_avatar(organization_id, UUID4(admin_or_owner['member_user_id']), file)
 
 @router.delete("/{organization_id}/avatar", status_code=status.HTTP_204_NO_CONTENT)
 def delete_organization_avatar(
