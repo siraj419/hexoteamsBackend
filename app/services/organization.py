@@ -236,6 +236,20 @@ class OrganizationService:
                 detail="Organization not found"
             )
         
+        # Invalidate active organization cache for all users who have this organization as active
+        # This ensures that when they fetch the organization, they get the new avatar_url
+        try:
+            members_response = supabase.table('organization_members').select('user_id').eq(
+                'org_id', str(organization_id)
+            ).eq('active', True).execute()
+            
+            if members_response.data:
+                for member in members_response.data:
+                    ActiveOrganizationCache.delete_organization(str(member['user_id']))
+        except Exception as e:
+            # Log but don't fail if cache invalidation fails
+            logger.warning(f"Failed to invalidate organization cache: {str(e)}")
+        
         return OrganizationChangeAvatarResponse(avatar_url=avatar_url)
     
     def delete_organization_avatar(
@@ -295,6 +309,20 @@ class OrganizationService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Organization not found"
                 )
+            
+            # Invalidate active organization cache for all users who have this organization as active
+            # This ensures that when they fetch the organization, it won't have the old avatar_url
+            try:
+                members_response = supabase.table('organization_members').select('user_id').eq(
+                    'org_id', str(organization_id)
+                ).eq('active', True).execute()
+                
+                if members_response.data:
+                    for member in members_response.data:
+                        ActiveOrganizationCache.delete_organization(str(member['user_id']))
+            except Exception as e:
+                # Log but don't fail if cache invalidation fails
+                logger.warning(f"Failed to invalidate organization cache: {str(e)}")
             
             return True
             
