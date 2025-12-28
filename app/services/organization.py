@@ -217,11 +217,11 @@ class OrganizationService:
         
         # upload the file
         file_data = self.files_service.upload_file(file, user_id, org_id=organization_id)
-        avatar_url = self.files_service.get_file_url(file_data['id'])
+        avatar_url = self.files_service.get_file_url(file_data.id)
         
         try:
             response = supabase.table('organizations').update({
-                'avatar_file_id': str(file_data['id']),
+                'avatar_file_id': str(file_data.id),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).eq('id', str(organization_id)).execute()
         except AuthApiError as e:
