@@ -304,15 +304,8 @@ class AuthService:
                 detail="Profile not found"
             )
         
-        if auth_request.display_name is not None:
-            try:
-                supabase.auth.update_user({
-                    "data": {
-                        "display_name": auth_request.display_name
-                    }
-                })
-            except AuthApiError as e:
-                pass
+        # Note: display_name is now stored in profiles table, not in user_metadata
+        # So we don't need to update Supabase auth user_metadata anymore
         
         # Invalidate user cache since profile was updated
         UserMeCache.delete_user(str(user.id))
