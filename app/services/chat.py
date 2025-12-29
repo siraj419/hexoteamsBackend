@@ -701,7 +701,40 @@ class ChatService:
                 
                 conversation = response.data[0]
             
+            # Enrich conversation with user info
             self._enrich_conversation_with_user_info(conversation, sender_id)
+            
+            # Fetch last message preview if conversation exists
+            # For direct messages, query direct_messages table filtered by participants and organization
+            try:
+                user1_id = conversation['user1_id']
+                user2_id = conversation['user2_id']
+                
+                last_msg_response = supabase.table('direct_messages').select(
+                    'id, body, created_at'
+                ).eq('organization_id', str(organization_id)).or_(
+                    f"sender_id.eq.{user1_id},sender_id.eq.{user2_id}"
+                ).or_(
+                    f"receiver_id.eq.{user1_id},receiver_id.eq.{user2_id}"
+                ).is_('deleted_at', 'null').order(
+                    'created_at', desc=True
+                ).limit(1).execute()
+                
+                if last_msg_response.data and len(last_msg_response.data) > 0:
+                    body = last_msg_response.data[0].get('body', '')
+                    if body:
+                        conversation['last_message_preview'] = body[:100] + ('...' if len(body) > 100 else '')
+                    else:
+                        conversation['last_message_preview'] = '[File attachment]'
+                else:
+                    conversation['last_message_preview'] = None
+            except Exception:
+                # If fetching last message fails, set to None
+                conversation['last_message_preview'] = None
+            
+            # Ensure unread_count is set
+            if 'unread_count' not in conversation:
+                conversation['unread_count'] = 0
             
             return ConversationResponse(**conversation)
             
