@@ -41,7 +41,7 @@ from app.services.attachment import AttachmentService
 from app.services.activity import ActivityService, ActivityType
 from app.services.link import LinkService, LinkEntityType
 from app.utils import calculate_time_ago, apply_pagination, calculate_file_size
-from app.utils.redis_cache import ProjectSummaryCache, redis_client
+from app.utils.redis_cache import ProjectSummaryCache, cache_service
 import json
 from app.utils.inbox_helpers import (
     trigger_task_assigned_notification,
@@ -1560,24 +1560,21 @@ class TaskService:
         project_info_dict = {}
         uncached_project_ids = []
         
-        # Check Redis cache for each project
-        if redis_client:
-            for project_id in project_ids:
-                project_id_str = str(project_id)
+        # Check cache for each project using CacheService
+        for project_id in project_ids:
+            project_id_str = str(project_id)
+            cache_key = f"project_info:{project_id_str}"
+            cached = cache_service.get(cache_key)
+            if cached:
                 try:
-                    cached = redis_client.get(f"project_info:{project_id_str}")
-                    if cached:
-                        project_data = json.loads(cached)
-                        # Convert id string to UUID4 for TaskProjectInfo
-                        project_data['id'] = UUID4(project_data['id'])
-                        project_info_dict[project_id_str] = TaskProjectInfo(**project_data)
-                    else:
-                        uncached_project_ids.append(project_id)
+                    # Convert id string to UUID4 for TaskProjectInfo
+                    cached['id'] = UUID4(cached['id'])
+                    project_info_dict[project_id_str] = TaskProjectInfo(**cached)
                 except Exception as e:
-                    logger.warning(f"Error getting project from cache: {e}")
+                    logger.warning(f"Error parsing cached project data: {e}")
                     uncached_project_ids.append(project_id)
-        else:
-            uncached_project_ids = list(project_ids)
+            else:
+                uncached_project_ids.append(project_id)
         
         # Fetch uncached projects from database
         if uncached_project_ids:
@@ -1611,23 +1608,15 @@ class TaskService:
                 
                 project_info_dict[project_id_str] = project_info
                 
-                # Cache the project info
-                if redis_client:
-                    try:
-                        cache_data = {
-                            'id': project_id_str,
-                            'name': project['name'],
-                            'avatar_color': project.get('avatar_color'),
-                            'avatar_icon': project.get('avatar_icon'),
-                            'avatar_url': avatar_url,
-                        }
-                        redis_client.setex(
-                            f"project_info:{project_id_str}",
-                            CACHE_TTL,
-                            json.dumps(cache_data)
-                        )
-                    except Exception as e:
-                        logger.warning(f"Error caching project info: {e}")
+                # Cache the project info using CacheService
+                cache_data = {
+                    'id': project_id_str,
+                    'name': project['name'],
+                    'avatar_color': project.get('avatar_color'),
+                    'avatar_icon': project.get('avatar_icon'),
+                    'avatar_url': avatar_url,
+                }
+                cache_service.set(f"project_info:{project_id_str}", cache_data, ttl=CACHE_TTL)
         
         return project_info_dict
     

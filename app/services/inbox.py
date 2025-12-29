@@ -19,7 +19,7 @@ from app.schemas.inbox import (
 
 from app.core import supabase
 from app.utils import calculate_time_ago
-from app.utils.redis_cache import redis_client
+from app.utils.redis_cache import cache_service
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +33,10 @@ class InboxService:
     def get_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxGetResponse:
         cache_key = f"inbox:{inbox_id}"
         
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    data = json.loads(cached)
-                    return InboxGetResponse(**data)
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return InboxGetResponse(**cached)
         
         try:
             response = supabase.table('inbox').select('*').eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
@@ -71,11 +67,8 @@ class InboxService:
             reference_id=inbox_data.get('reference_id'),
         )
         
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, self.CACHE_TTL, json.dumps(result.model_dump(mode='json')))
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
         
         return result
     
@@ -163,14 +156,10 @@ class InboxService:
         
         cache_key = f"inbox:list:{user_id}:{org_id}:{include_archived}:{unread_only}:{order_by}:{limit}:{offset}"
         
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    data = json.loads(cached)
-                    return InboxGetPaginatedResponse(**data)
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return InboxGetPaginatedResponse(**cached)
         
         query = supabase.table('inbox').select('*', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id))
         
@@ -219,11 +208,8 @@ class InboxService:
             limit=limit,
         )
         
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, self.CACHE_TTL, json.dumps(result.model_dump(mode='json')))
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
         
         return result
     
@@ -237,14 +223,10 @@ class InboxService:
         """Get only archived inbox notifications with pagination."""
         cache_key = f"inbox:archived:{user_id}:{org_id}:{limit}:{offset}"
         
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    data = json.loads(cached)
-                    return InboxGetPaginatedResponse(**data)
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return InboxGetPaginatedResponse(**cached)
         
         query = supabase.table('inbox').select('*', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id)).eq('is_archived', True)
         
@@ -281,11 +263,8 @@ class InboxService:
             limit=limit,
         )
         
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, self.CACHE_TTL, json.dumps(result.model_dump(mode='json')))
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
         
         return result
     
@@ -387,13 +366,10 @@ class InboxService:
     def get_unread_count(self, user_id: UUID4, org_id: UUID4) -> int:
         cache_key = f"inbox:unread:{user_id}:{org_id}"
         
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    return int(cached)
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
+        # Check cache first (shorter TTL for unread count)
+        cached = cache_service.get(cache_key)
+        if cached is not None:
+            return int(cached)
         
         try:
             response = supabase.table('inbox').select('id', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id)).eq('is_read', False).eq('is_archived', False).execute()
@@ -402,24 +378,18 @@ class InboxService:
             logger.error(f"Failed to get unread count: {e}")
             return 0
         
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, 60, str(count))
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
+        # Cache the result (shorter TTL for unread count - 60 seconds)
+        cache_service.set(cache_key, count, ttl=60)
         
         return count
     
     def _get_user_time_zone(self, user_id: UUID4) -> str:
         cache_key = f"user:timezone:{user_id}"
         
-        if redis_client:
-            try:
-                cached = redis_client.get(cache_key)
-                if cached:
-                    return cached
-            except Exception as e:
-                logger.warning(f"Redis get error: {e}")
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
         
         try:
             response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
@@ -432,38 +402,26 @@ class InboxService:
         
         timezone_val = response.data[0].get('timezone', 'UTC')
         
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, 3600, timezone_val)
-            except Exception as e:
-                logger.warning(f"Redis set error: {e}")
+        # Cache the result (1 hour TTL - timezone rarely changes)
+        cache_service.set(cache_key, timezone_val, ttl=3600)
         
         return timezone_val
     
     def _invalidate_inbox_cache(self, inbox_id: UUID4, user_id: UUID4, org_id: Optional[str] = None):
-        if not redis_client:
-            return
-        
         try:
-            redis_client.delete(f"inbox:{inbox_id}")
+            cache_service.delete(f"inbox:{inbox_id}")
             if org_id:
-                self._invalidate_user_inbox_cache(user_id, org_id)
+                self._invalidate_user_inbox_cache(user_id, UUID4(org_id))
         except Exception as e:
             logger.warning(f"Redis delete error: {e}")
     
     def _invalidate_user_inbox_cache(self, user_id: UUID4, org_id: UUID4):
-        if not redis_client:
-            return
+        from app.utils.redis_cache import cache_service
         
         try:
-            pattern = f"inbox:list:{user_id}:{org_id}:*"
-            for key in redis_client.scan_iter(match=pattern):
-                redis_client.delete(key)
-            
-            archived_pattern = f"inbox:archived:{user_id}:{org_id}:*"
-            for key in redis_client.scan_iter(match=archived_pattern):
-                redis_client.delete(key)
-            
-            redis_client.delete(f"inbox:unread:{user_id}:{org_id}")
+            # Use pattern-based invalidation
+            cache_service.invalidate_pattern(f"inbox:list:{user_id}:{org_id}:*")
+            cache_service.invalidate_pattern(f"inbox:archived:{user_id}:{org_id}:*")
+            cache_service.delete(f"inbox:unread:{user_id}:{org_id}")
         except Exception as e:
             logger.warning(f"Redis delete error: {e}")

@@ -11,9 +11,11 @@ from app.schemas.attachments import (
 )
 from app.services.files import FilesService
 from app.utils import apply_pagination, calculate_file_size
-from app.utils.redis_cache import ProjectSummaryCache
+from app.utils.redis_cache import ProjectSummaryCache, cache_service
 
 class AttachmentService:
+    CACHE_TTL_ATTACHMENTS = 180  # 3 minutes
+    
     def __init__(self, files_service: FilesService):
         self.files_service = files_service
 
@@ -50,6 +52,9 @@ class AttachmentService:
 
         # get file info
         file_info = self.files_service.get_file(file_id)
+        
+        # Invalidate attachment caches
+        cache_service.invalidate_pattern(f"attachments:list:{entity_type}:{entity_id}:*")
         
         # Invalidate project summary cache for project attachments
         if entity_type == AttachmentType.PROJECT:
@@ -98,6 +103,14 @@ class AttachmentService:
         Optimized to fetch all data in a single query with file info joined.
         Ordered by created_at descending (newest first).
         """
+        # Build cache key
+        cache_key = f"attachments:list:{entity_type}:{entity_id}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return AttachmentGetPaginatedResponse(**cached)
+        
         query = supabase.table('attachments').select('id,file_id,files(name,size_bytes,content_type)', count='exact').eq('entity_type', entity_type.value).eq('entity_id', str(entity_id)).order('created_at', desc=True)
         
         limit, offset, query = apply_pagination(query, limit, offset)
@@ -120,12 +133,17 @@ class AttachmentService:
             content_type=attachment['files']['content_type'],
         ) for attachment in response.data]
         
-        return AttachmentGetPaginatedResponse(
+        result = AttachmentGetPaginatedResponse(
             attachments=attachments,
             total=total_count,
             offset=offset,
             limit=limit,
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ATTACHMENTS)
+        
+        return result
     
     def delete_attachment(
         self,
@@ -157,9 +175,15 @@ class AttachmentService:
                 detail="Attachment not found"
             )
         
-        # Invalidate project summary cache for project attachments
-        if attachment_data and attachment_data.get('entity_type') == AttachmentType.PROJECT.value:
-            ProjectSummaryCache.delete_summary(attachment_data['entity_id'])
+        # Invalidate attachment caches
+        if attachment_data:
+            entity_type = attachment_data.get('entity_type')
+            entity_id = attachment_data.get('entity_id')
+            cache_service.invalidate_pattern(f"attachments:list:{entity_type}:{entity_id}:*")
+            
+            # Invalidate project summary cache for project attachments
+            if entity_type == AttachmentType.PROJECT.value:
+                ProjectSummaryCache.delete_summary(entity_id)
         
         return True
 
@@ -175,6 +199,9 @@ class AttachmentService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete all attachments: {e}"
             )
+        
+        # Invalidate attachment caches
+        cache_service.invalidate_pattern(f"attachments:list:{entity_type}:{entity_id}:*")
         
         # Invalidate project summary cache for project attachments
         if entity_type == AttachmentType.PROJECT:

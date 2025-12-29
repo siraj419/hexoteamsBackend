@@ -18,7 +18,6 @@ from .auth import (
     AuthUpdateProfileResponse,
     AuthChangeAvatarResponse,
     AuthRemoveAvatarResponse,
-    OAuthInitiateResponse,
 )
 
 __all__ = [
@@ -41,5 +40,4 @@ __all__ = [
     "AuthChangeAvatarResponse",
     "AuthRemoveAvatarResponse",
     "User",
-    "OAuthInitiateResponse",
 ]

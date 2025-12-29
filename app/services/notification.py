@@ -8,6 +8,7 @@ import asyncio
 from app.schemas.inbox import InboxEventType, InboxResponse
 from app.services.inbox import InboxService
 from app.utils.websocket_manager import manager
+from app.utils.redis_cache import cache_service
 from app.core import supabase
 from app.tasks.tasks import send_email_task
 from supabase_auth.errors import AuthApiError
@@ -16,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 class NotificationService:
+    CACHE_TTL_PREFERENCES = 600  # 10 minutes
+    CACHE_TTL_EMAIL = 600  # 10 minutes
+    
     def __init__(self):
         self.inbox_service = InboxService()
     
@@ -315,37 +319,59 @@ class NotificationService:
     
     def _get_user_preferences(self, user_id: UUID4) -> Dict[str, Any]:
         """Get user notification preferences from profile"""
+        cache_key = f"user:preferences:{user_id}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
+        
         try:
             response = supabase.table('profiles').select(
                 'browser_notifications, email_notifications'
             ).eq('user_id', str(user_id)).execute()
             
             if not response.data or len(response.data) == 0:
-                return {
+                default_prefs = {
                     'browser_notifications': True,
                     'email_notifications': True,
                 }
+                cache_service.set(cache_key, default_prefs, ttl=self.CACHE_TTL_PREFERENCES)
+                return default_prefs
             
-            return {
+            prefs = {
                 'browser_notifications': response.data[0].get('browser_notifications', True),
                 'email_notifications': response.data[0].get('email_notifications', True),
             }
+            cache_service.set(cache_key, prefs, ttl=self.CACHE_TTL_PREFERENCES)
+            return prefs
         except Exception as e:
             logger.error(f"Failed to get user preferences: {e}")
-            return {
+            default_prefs = {
                 'browser_notifications': True,
                 'email_notifications': True,
             }
+            return default_prefs
     
     def _get_user_email(self, user_id: UUID4) -> Optional[str]:
         """Get user email from profile"""
+        cache_key = f"user:email:{user_id}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
+        
         try:
             response = supabase.table('profiles').select('email').eq('user_id', str(user_id)).execute()
             
             if not response.data or len(response.data) == 0:
                 return None
             
-            return response.data[0].get('email')
+            email = response.data[0].get('email')
+            if email:
+                cache_service.set(cache_key, email, ttl=self.CACHE_TTL_EMAIL)
+            return email
         except Exception as e:
             logger.error(f"Failed to get user email: {e}")
             return None
