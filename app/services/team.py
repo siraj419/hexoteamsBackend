@@ -26,7 +26,9 @@ from app.services.project import ProjectService
 from app.services.files import FilesService
 from app.utils import calculate_time_ago, apply_pagination
 from app.utils.inbox_helpers import trigger_organization_invitation_notification
+from app.utils.redis_cache import redis_client
 from app.tasks.tasks import send_email_task
+import json
 
 settings = Settings()
 
@@ -711,34 +713,77 @@ class TeamService:
         }
     
     def _batch_get_user_info(self, user_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
-        """Batch fetch user info."""
+        """Batch fetch user info with caching."""
         if not user_ids:
             return {}
         
-        try:
-            user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in user_ids]
-            response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').in_('user_id', user_id_strings).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to batch get user info: {e}"
-            )
-        
+        CACHE_TTL = 300  # 5 minutes cache
         users_dict = {}
-        for profile in response.data:
-            avatar_url = None
-            if profile.get('avatar_file_id'):
+        uncached_user_ids = []
+        
+        # Check cache for each user
+        if redis_client:
+            for user_id in user_ids:
+                user_id_str = str(user_id)
+                cache_key = f"user_info:{user_id_str}"
                 try:
-                    avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
-                except Exception:
-                    pass
+                    cached = redis_client.get(cache_key)
+                    if cached:
+                        try:
+                            cached_user = json.loads(cached)
+                            # Validate cached data has required keys
+                            if isinstance(cached_user, dict) and 'id' in cached_user and 'display_name' in cached_user and 'email' in cached_user:
+                                users_dict[user_id_str] = cached_user
+                            else:
+                                # Invalid cache structure, fetch from DB
+                                uncached_user_ids.append(user_id)
+                        except (json.JSONDecodeError, KeyError, TypeError) as e:
+                            # Invalid cache data, fetch from DB
+                            uncached_user_ids.append(user_id)
+                    else:
+                        uncached_user_ids.append(user_id)
+                except Exception as e:
+                    # Cache error, fetch from DB
+                    uncached_user_ids.append(user_id)
+        else:
+            uncached_user_ids = list(user_ids)
+        
+        # Fetch uncached users from database
+        if uncached_user_ids:
+            try:
+                user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in uncached_user_ids]
+                response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').in_('user_id', user_id_strings).execute()
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to batch get user info: {e}"
+                )
             
-            users_dict[str(profile['user_id'])] = {
-                'id': profile['user_id'],
-                'display_name': profile['display_name'],
-                'email': profile['email'],
-                'avatar_url': avatar_url,
-            }
+            for profile in response.data:
+                avatar_url = None
+                if profile.get('avatar_file_id'):
+                    try:
+                        avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                    except Exception:
+                        pass
+                
+                user_id_str = str(profile['user_id'])
+                user_data = {
+                    'id': profile['user_id'],
+                    'display_name': profile['display_name'],
+                    'email': profile['email'],
+                    'avatar_url': avatar_url,
+                }
+                
+                users_dict[user_id_str] = user_data
+                
+                # Cache the user info
+                if redis_client:
+                    try:
+                        cache_key = f"user_info:{user_id_str}"
+                        redis_client.setex(cache_key, CACHE_TTL, json.dumps(user_data))
+                    except Exception:
+                        pass  # Continue even if caching fails
         
         return users_dict
     
