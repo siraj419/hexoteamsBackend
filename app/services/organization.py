@@ -18,7 +18,7 @@ from app.schemas.organizations import (
 from app.utils import random_color, random_icon
 from app.services.files import FilesService
 from app.core import settings
-from app.utils.redis_cache import ActiveOrganizationCache
+from app.utils.redis_cache import ActiveOrganizationCache, cache_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -236,19 +236,22 @@ class OrganizationService:
                 detail="Organization not found"
             )
         
-        # Invalidate active organization cache for all users who have this organization as active
-        # This ensures that when they fetch the organization, they get the new avatar_url
-        try:
-            members_response = supabase.table('organization_members').select('user_id').eq(
-                'org_id', str(organization_id)
-            ).eq('active', True).execute()
+            # Invalidate organization and active organization caches
+            cache_service.delete(f"organization:{organization_id}")
             
-            if members_response.data:
-                for member in members_response.data:
-                    ActiveOrganizationCache.delete_organization(str(member['user_id']))
-        except Exception as e:
-            # Log but don't fail if cache invalidation fails
-            logger.warning(f"Failed to invalidate organization cache: {str(e)}")
+            # Invalidate active organization cache for all users who have this organization as active
+            # This ensures that when they fetch the organization, they get the new avatar_url
+            try:
+                members_response = supabase.table('organization_members').select('user_id').eq(
+                    'org_id', str(organization_id)
+                ).eq('active', True).execute()
+                
+                if members_response.data:
+                    user_ids = [str(member['user_id']) for member in members_response.data]
+                    ActiveOrganizationCache.delete_many(user_ids)
+            except Exception as e:
+                # Log but don't fail if cache invalidation fails
+                logger.warning(f"Failed to invalidate organization cache: {str(e)}")
         
         return OrganizationChangeAvatarResponse(avatar_url=avatar_url)
     
@@ -310,6 +313,9 @@ class OrganizationService:
                     detail="Organization not found"
                 )
             
+            # Invalidate organization and active organization caches
+            cache_service.delete(f"organization:{organization_id}")
+            
             # Invalidate active organization cache for all users who have this organization as active
             # This ensures that when they fetch the organization, it won't have the old avatar_url
             try:
@@ -318,8 +324,8 @@ class OrganizationService:
                 ).eq('active', True).execute()
                 
                 if members_response.data:
-                    for member in members_response.data:
-                        ActiveOrganizationCache.delete_organization(str(member['user_id']))
+                    user_ids = [str(member['user_id']) for member in members_response.data]
+                    ActiveOrganizationCache.delete_many(user_ids)
             except Exception as e:
                 # Log but don't fail if cache invalidation fails
                 logger.warning(f"Failed to invalidate organization cache: {str(e)}")
@@ -372,13 +378,28 @@ class OrganizationService:
                 detail="Organization not found"
             )
         
-        return OrganizationUpdateResponse(
+        result = OrganizationUpdateResponse(
             id=response.data[0]['id'],
             name=response.data[0]['name'],
             description=response.data[0]['description'],
             avatar_color=response.data[0]['avatar_color'],
-            avatar_icon=response.data[0]['avatar_icon']
+            avatar_icon=response.data[0]['avatar_icon'],
         )
+        
+        # Invalidate organization caches
+        cache_service.delete(f"organization:{organization_id}")
+        # Also invalidate active org cache for all members (organization info changed)
+        try:
+            members_response = supabase.table('organization_members').select('user_id').eq(
+                'org_id', str(organization_id)
+            ).eq('active', True).execute()
+            if members_response.data:
+                user_ids = [str(member['user_id']) for member in members_response.data]
+                ActiveOrganizationCache.delete_many(user_ids)
+        except Exception as e:
+            logger.warning(f"Failed to invalidate organization cache: {str(e)}")
+        
+        return result
 
     def set_active_organization(
         self,

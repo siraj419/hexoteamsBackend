@@ -26,11 +26,16 @@ from app.services.project import ProjectService
 from app.services.files import FilesService
 from app.utils import calculate_time_ago, apply_pagination
 from app.utils.inbox_helpers import trigger_organization_invitation_notification
+from app.utils.redis_cache import cache_service, UserCache
 from app.tasks.tasks import send_email_task
 
 settings = Settings()
 
 class TeamService:
+    CACHE_TTL_INVITATIONS = 180  # 3 minutes
+    CACHE_TTL_MEMBERS = 180  # 3 minutes
+    CACHE_TTL_ORG = 600  # 10 minutes
+    
     def __init__(self):
         self.organization_service = OrganizationService()
         self.project_service = ProjectService()
@@ -129,6 +134,9 @@ class TeamService:
                 logger = logging.getLogger(__name__)
                 logger.error(f"Failed to process invitation for {email}: {str(e)}", exc_info=True)
                 continue
+        
+        # Invalidate invitation caches
+        cache_service.invalidate_pattern(f"team:invitations:{org_id}:*")
     
     def accept_invitation(
         self,
@@ -180,6 +188,10 @@ class TeamService:
             org_service = OrganizationService()
             org_service.set_active_organization(org_id, user_id)
             
+            # Invalidate invitation and member caches
+            cache_service.invalidate_pattern(f"team:invitations:{org_id}:*")
+            cache_service.invalidate_pattern(f"team:members:{org_id}:*")
+            
             return TeamInvitationAcceptResponse(
                 success=True,
                 message="Invitation accepted successfully",
@@ -206,6 +218,13 @@ class TeamService:
         """
         Get all invitations for an organization with pagination.
         """
+        # Skip caching if search is provided (too dynamic)
+        if not search:
+            cache_key = f"team:invitations:{org_id}:{limit}:{offset}"
+            cached = cache_service.get(cache_key)
+            if cached:
+                return cached
+        
         query = supabase.table('invitations').select(
             'id, email, token, invited_by, accepted_at, expires_at, created_at, added_project_ids, as_admin',
             count='exact'
@@ -313,7 +332,13 @@ class TeamService:
                 as_admin=inv.get('as_admin', False),
             ))
         
-        return {'invitations': invitations, 'total': total, 'limit': limit, 'offset': offset}
+        result = {'invitations': invitations, 'total': total, 'limit': limit, 'offset': offset}
+        
+        # Cache result if no search
+        if not search:
+            cache_service.set(f"team:invitations:{org_id}:{limit}:{offset}", result, ttl=self.CACHE_TTL_INVITATIONS)
+        
+        return result
     
     def get_team_members(
         self,
@@ -326,6 +351,13 @@ class TeamService:
         """
         Get all members of an organization with pagination and filters.
         """
+        # Skip caching if search is provided
+        if not search:
+            cache_key = f"team:members:{org_id}:{role}:{limit}:{offset}"
+            cached = cache_service.get(cache_key)
+            if cached:
+                return cached
+        
         query = supabase.table('organization_members').select(
             'user_id, role, created_at',
             count='exact'
@@ -397,7 +429,13 @@ class TeamService:
         else:
             total = response.count if hasattr(response, 'count') and response.count else len(members)
         
-        return {'members': members, 'total': total, 'limit': limit, 'offset': offset}
+        result = {'members': members, 'total': total, 'limit': limit, 'offset': offset}
+        
+        # Cache result if no search
+        if not search:
+            cache_service.set(f"team:members:{org_id}:{role}:{limit}:{offset}", result, ttl=self.CACHE_TTL_MEMBERS)
+        
+        return result
     
     def remove_user(
         self,
@@ -423,6 +461,9 @@ class TeamService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to remove user: {e}"
             )
+        
+        # Invalidate member caches
+        cache_service.invalidate_pattern(f"team:members:{org_id}:*")
     
     def toggle_user_admin(
         self,
@@ -453,6 +494,9 @@ class TeamService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update user role: {e}"
             )
+        
+        # Invalidate member caches
+        cache_service.invalidate_pattern(f"team:members:{org_id}:*")
         
         return {'role': new_role.value}
     
@@ -486,6 +530,11 @@ class TeamService:
     
     def _get_organization_info(self, org_id: UUID4) -> Dict[str, Any]:
         """Get organization information."""
+        cache_key = f"organization:{org_id}"
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
+        
         try:
             response = supabase.table('organizations').select('id, name').eq('id', str(org_id)).execute()
         except AuthApiError as e:
@@ -500,7 +549,10 @@ class TeamService:
                 detail="Organization not found"
             )
         
-        return response.data[0]
+        org_data = response.data[0]
+        cache_service.set(cache_key, org_data, ttl=self.CACHE_TTL_ORG)
+        
+        return org_data
     
     def _get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get user by email from auth.users table."""
@@ -707,7 +759,24 @@ class TeamService:
         return None
     
     def _get_user_info(self, user_id: UUID4) -> Dict[str, Any]:
-        """Get user info from profile."""
+        """Get user info from profile - Uses UserCache."""
+        cached_user = UserCache.get_user(str(user_id))
+        if cached_user:
+            avatar_url = None
+            if cached_user.get('avatar_file_id'):
+                try:
+                    avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                except Exception:
+                    pass
+            
+            return {
+                'id': cached_user['id'],
+                'display_name': cached_user['display_name'],
+                'email': cached_user.get('email'),
+                'avatar_url': avatar_url,
+            }
+        
+        # Fetch from database if not cached
         try:
             response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').eq('user_id', str(user_id)).execute()
         except AuthApiError as e:
@@ -726,79 +795,151 @@ class TeamService:
         avatar_url = None
         if profile.get('avatar_file_id'):
             try:
-                avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
             except Exception:
                 pass
         
-        return {
+        user_data = {
             'id': profile['user_id'],
             'display_name': profile['display_name'],
             'email': profile['email'],
             'avatar_url': avatar_url,
         }
+        
+        # Cache the user data
+        user_data_for_cache = {
+            'id': profile['user_id'],
+            'display_name': profile['display_name'],
+            'avatar_file_id': profile.get('avatar_file_id'),
+        }
+        UserCache.set_user(str(user_id), user_data_for_cache)
+        
+        return user_data
     
     def _batch_get_user_info(self, user_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
-        """Batch fetch user info."""
+        """Batch fetch user info - Uses UserCache for caching."""
         if not user_ids:
             return {}
         
-        try:
-            user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in user_ids]
-            response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').in_('user_id', user_id_strings).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to batch get user info: {e}"
-            )
-        
         users_dict = {}
-        for profile in response.data:
-            avatar_url = None
-            if profile.get('avatar_file_id'):
-                try:
-                    avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
-                except Exception:
-                    pass
+        uncached_user_ids = []
+        
+        # Check cache for each user
+        for user_id in user_ids:
+            user_id_str = str(user_id)
+            cached_user = UserCache.get_user(user_id_str)
+            if cached_user:
+                avatar_url = None
+                if cached_user.get('avatar_file_id'):
+                    try:
+                        avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                    except Exception:
+                        pass
+                
+                users_dict[user_id_str] = {
+                    'id': cached_user['id'],
+                    'display_name': cached_user['display_name'],
+                    'email': cached_user.get('email'),
+                    'avatar_url': avatar_url,
+                }
+            else:
+                uncached_user_ids.append(user_id)
+        
+        # Batch fetch uncached users
+        if uncached_user_ids:
+            try:
+                user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in uncached_user_ids]
+                response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').in_('user_id', user_id_strings).execute()
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to batch get user info: {e}"
+                )
             
-            users_dict[str(profile['user_id'])] = {
-                'id': profile['user_id'],
-                'display_name': profile['display_name'],
-                'email': profile['email'],
-                'avatar_url': avatar_url,
-            }
+            for profile in response.data:
+                avatar_url = None
+                if profile.get('avatar_file_id'):
+                    try:
+                        avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                    except Exception:
+                        pass
+                
+                user_id_str = str(profile['user_id'])
+                users_dict[user_id_str] = {
+                    'id': profile['user_id'],
+                    'display_name': profile['display_name'],
+                    'email': profile['email'],
+                    'avatar_url': avatar_url,
+                }
+                
+                # Cache the user data
+                user_data_for_cache = {
+                    'id': profile['user_id'],
+                    'display_name': profile['display_name'],
+                    'avatar_file_id': profile.get('avatar_file_id'),
+                }
+                UserCache.set_user(user_id_str, user_data_for_cache)
         
         return users_dict
     
     def _batch_get_project_info(self, project_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
-        """Batch fetch project info."""
+        """Batch fetch project info - Uses caching similar to TaskService."""
         if not project_ids:
             return {}
         
-        try:
-            project_id_strings = [str(pid) if isinstance(pid, uuid.UUID) else pid for pid in project_ids]
-            response = supabase.table('projects').select('id, name, avatar_color, avatar_icon, avatar_file_id').in_('id', project_id_strings).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to batch get project info: {e}"
-            )
+        from app.utils.redis_cache import cache_service
         
+        CACHE_TTL = 300  # 5 minutes
         projects_dict = {}
-        for project in response.data:
-            avatar_url = None
-            if project.get('avatar_file_id'):
-                try:
-                    avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
-                except Exception:
-                    pass
+        uncached_project_ids = []
+        
+        # Check cache for each project
+        for project_id in project_ids:
+            project_id_str = str(project_id)
+            cache_key = f"project_info:{project_id_str}"
+            cached = cache_service.get(cache_key)
+            if cached:
+                projects_dict[project_id_str] = cached
+            else:
+                uncached_project_ids.append(project_id)
+        
+        # Batch fetch uncached projects
+        if uncached_project_ids:
+            try:
+                project_id_strings = [str(pid) if isinstance(pid, uuid.UUID) else pid for pid in uncached_project_ids]
+                response = supabase.table('projects').select('id, name, avatar_color, avatar_icon, avatar_file_id').in_('id', project_id_strings).execute()
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to batch get project info: {e}"
+                )
             
-            projects_dict[str(project['id'])] = {
-                'id': project['id'],
-                'name': project['name'],
-                'avatar_color': project.get('avatar_color'),
-                'avatar_icon': project.get('avatar_icon'),
-                'avatar_url': avatar_url,
-            }
+            # Cache mapping for batch set
+            cache_mapping = {}
+            
+            for project in response.data:
+                avatar_url = None
+                if project.get('avatar_file_id'):
+                    try:
+                        avatar_url = self.files_service.get_file_url(UUID4(project['avatar_file_id']))
+                    except Exception:
+                        pass
+                
+                project_id_str = str(project['id'])
+                project_data = {
+                    'id': project['id'],
+                    'name': project['name'],
+                    'avatar_color': project.get('avatar_color'),
+                    'avatar_icon': project.get('avatar_icon'),
+                    'avatar_url': avatar_url,
+                }
+                
+                projects_dict[project_id_str] = project_data
+                cache_mapping[f"project_info:{project_id_str}"] = project_data
+            
+            # Batch cache all projects
+            if cache_mapping:
+                cache_service.set_many(cache_mapping, ttl=CACHE_TTL)
         
         return projects_dict
     

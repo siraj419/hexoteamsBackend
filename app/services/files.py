@@ -20,8 +20,12 @@ from app.schemas.files import (
     FileGetPaginatedResponseWithUploaders,
 )
 from app.utils import calculate_file_size, apply_pagination
+from app.utils.redis_cache import cache_service, UserCache
 
 class FilesService:
+    CACHE_TTL_FILE = 300  # 5 minutes for single file
+    CACHE_TTL_FILE_LIST = 180  # 3 minutes for file lists
+    
     def __init__(self):
         self.s3_service = s3_service
 
@@ -103,7 +107,7 @@ class FilesService:
                 detail="User profile not found"
             )
         
-        return FileBaseResponse(
+        file_response = FileBaseResponse(
             id=response.data[0]['id'],
             name=response.data[0]['name'],
             size=calculate_file_size(response.data[0]['size_bytes']),
@@ -111,6 +115,11 @@ class FilesService:
             uploaded_by=response.data[0]['uploaded_by'],
             is_deleted=response.data[0]['is_deleted'],
         )
+        
+        # Invalidate file list caches
+        cache_service.invalidate_pattern("files:list:*")
+        
+        return file_response
     
     def update_file(self, file_id: UUID4, file: UploadFile) -> Dict[str, Any]:
         # validate the file
@@ -153,6 +162,10 @@ class FilesService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to upload file to storage. Please try again later."
             )
+        
+        # Invalidate file caches
+        cache_service.delete(f"file:{file_id}")
+        cache_service.invalidate_pattern("files:list:*")
         
         return response.data[0]
 
@@ -200,7 +213,7 @@ class FilesService:
         # Get user profile for response
         uploaded_by = self._get_user_profile(UUID4(file_data["uploaded_by"]))
         
-        return FileBaseResponse(
+        file_response = FileBaseResponse(
             id=UUID4(file_data["id"]),
             name=file_data["name"],
             size=calculate_file_size(file_data["size_bytes"]),
@@ -208,6 +221,12 @@ class FilesService:
             is_deleted=file_data.get("is_deleted", False),
             content_type=file_data["content_type"],
         )
+        
+        # Invalidate file caches
+        cache_service.delete(f"file:{file_id}")
+        cache_service.invalidate_pattern("files:list:*")
+        
+        return file_response
     
     def update_file_project_id(self, file_id: UUID4, project_id: UUID4) -> Dict[str, Any]:
         try:
@@ -234,6 +253,10 @@ class FilesService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete file record from database: {e}"
             )
+        
+        # Invalidate file caches
+        cache_service.delete(f"file:{file_id}")
+        cache_service.invalidate_pattern("files:list:*")
         
         return True
     
@@ -277,6 +300,10 @@ class FilesService:
                 detail=f"Failed to restore file record from database: {e}"
             )
         
+        # Invalidate file caches
+        cache_service.delete(f"file:{file_id}")
+        cache_service.invalidate_pattern("files:list:*")
+        
         return file_data.data[0]
 
     def get_files(self, 
@@ -286,7 +313,7 @@ class FilesService:
             is_deleted: Optional[bool] = None,
             limit: Optional[int] = None,
             offset: Optional[int] = None
-    ) -> tuple[List[FileBaseResponseWithUploaderId], Dict[str, FileUploadedByUserGetResponse]]:
+    ) -> FileGetPaginatedResponseWithUploaders:
         """
         Get files with optimized uploader information.
         
@@ -295,6 +322,13 @@ class FilesService:
             - uploaders: Dictionary mapping user_id -> uploader profile
         
         """
+        # Build cache key
+        cache_key = f"files:list:{user_id}:{org_id}:{project_id}:{is_deleted}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return FileGetPaginatedResponseWithUploaders(**cached)
         
         query = supabase.table("files").select(
             "id, name, size_bytes, content_type, uploaded_by, org_id, project_id, is_deleted, created_at",
@@ -362,15 +396,27 @@ class FilesService:
                     detail=f"Failed to get uploader profiles: {e}"
                 )
         
-        return FileGetPaginatedResponseWithUploaders(
+        result = FileGetPaginatedResponseWithUploaders(
             files=files_data,
             uploaders=uploaders_dict,
             total=response.count,
             limit=limit,
             offset=offset,
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_FILE_LIST)
+        
+        return result
 
     def get_file(self, file_id: UUID4) -> FileBaseResponse:
+        cache_key = f"file:{file_id}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return FileBaseResponse(**cached)
+        
         try:
             response = supabase.table("files").select(
                 "id, name, size_bytes, content_type, uploaded_by, is_deleted"
@@ -387,7 +433,7 @@ class FilesService:
                 detail="File not found"
             )
         
-        return FileBaseResponse(
+        file_data = FileBaseResponse(
             id=response.data[0]['id'],
             name=response.data[0]['name'],
             size=calculate_file_size(response.data[0]['size_bytes']),
@@ -395,6 +441,11 @@ class FilesService:
             uploaded_by=response.data[0]['uploaded_by'],
             is_deleted=response.data[0]['is_deleted'],
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, file_data.model_dump(), ttl=self.CACHE_TTL_FILE)
+        
+        return file_data
 
     def get_file_url(self, file_id: UUID4) -> str:
         # Get file metadata to extract the extension
@@ -477,8 +528,25 @@ class FilesService:
         return self.s3_service.validate_file_size(size)
     
     def _get_user_profile(self, user_id: UUID4) -> FileUploadedByUserGetResponse:
+        # Use UserCache for consistency
+        cached_user = UserCache.get_user(str(user_id))
+        if cached_user:
+            avatar_url = None
+            if cached_user.get('avatar_file_id'):
+                try:
+                    avatar_url = self.get_file_url(UUID4(cached_user['avatar_file_id']))
+                except HTTPException:
+                    pass
+            
+            return FileUploadedByUserGetResponse(
+                id=UUID4(cached_user['id']),
+                display_name=cached_user['display_name'],
+                avatar_url=avatar_url,
+            )
+        
+        # Fetch from database if not cached
         try:
-            response = supabase.table("profiles").select("display_name, avatar_file_id").eq("user_id", str(user_id)).execute()
+            response = supabase.table("profiles").select("user_id, display_name, avatar_file_id").eq("user_id", str(user_id)).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -491,17 +559,25 @@ class FilesService:
                 detail="User profile not found"
             )
         
+        profile = response.data[0]
         avatar_url = None
-        if response.data[0]['avatar_file_id']:
+        if profile.get('avatar_file_id'):
             try:
-                avatar_url = self.get_file_url(response.data[0]['avatar_file_id'])
+                avatar_url = self.get_file_url(UUID4(profile['avatar_file_id']))
             except HTTPException:
                 pass
         
+        # Cache the user data
+        user_data_for_cache = {
+            'id': profile['user_id'],
+            'display_name': profile['display_name'],
+            'avatar_file_id': profile.get('avatar_file_id'),
+        }
+        UserCache.set_user(str(user_id), user_data_for_cache)
         
         return FileUploadedByUserGetResponse(
-            id=user_id,
-            display_name=response.data[0]['display_name'],
+            id=UUID4(profile['user_id']),
+            display_name=profile['display_name'],
             avatar_url=avatar_url,
         )
     
