@@ -830,19 +830,24 @@ class TeamService:
             user_id_str = str(user_id)
             cached_user = UserCache.get_user(user_id_str)
             if cached_user:
-                avatar_url = None
-                if cached_user.get('avatar_file_id'):
-                    try:
-                        avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
-                    except Exception:
-                        pass
-                
-                users_dict[user_id_str] = {
-                    'id': cached_user['id'],
-                    'display_name': cached_user['display_name'],
-                    'email': cached_user.get('email'),
-                    'avatar_url': avatar_url,
-                }
+                # Validate cached data has required keys
+                if isinstance(cached_user, dict) and 'id' in cached_user and 'display_name' in cached_user:
+                    avatar_url = None
+                    if cached_user.get('avatar_file_id'):
+                        try:
+                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                        except Exception:
+                            pass
+                    
+                    users_dict[user_id_str] = {
+                        'id': cached_user['id'],
+                        'display_name': cached_user['display_name'],
+                        'email': cached_user.get('email'),
+                        'avatar_url': avatar_url,
+                    }
+                else:
+                    # Invalid cache structure, fetch from DB
+                    uncached_user_ids.append(user_id)
             else:
                 uncached_user_ids.append(user_id)
         
@@ -877,6 +882,7 @@ class TeamService:
                 user_data_for_cache = {
                     'id': profile['user_id'],
                     'display_name': profile['display_name'],
+                    'email': profile.get('email'),
                     'avatar_file_id': profile.get('avatar_file_id'),
                 }
                 UserCache.set_user(user_id_str, user_data_for_cache)
