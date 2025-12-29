@@ -359,33 +359,42 @@ class TeamService:
         if not search:
             cache_key = f"team:members:{org_id}:{role}:{limit}:{offset}"
             cached = cache_service.get(cache_key)
-            if cached:
+            if cached and cached.get('members'):
                 # Reconstruct Pydantic models from cached dict
                 # The cached data should have role as a string (from model_dump(mode='json'))
                 # Pydantic will automatically convert it to TeamUserRole enum
                 members_list = []
                 for member_dict in cached.get('members', []):
-                    # Email should always be in cached data now, but handle edge case
-                    if not member_dict.get('email'):
-                        logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
-                        continue
-                    
-                    # Ensure role is a string (not Enum class or instance)
-                    if 'role' in member_dict:
-                        role_value = member_dict['role']
-                        # If it's already a string, keep it; if it's an Enum, get its value
-                        if isinstance(role_value, TeamUserRole):
-                            member_dict['role'] = role_value.value
-                        elif not isinstance(role_value, str):
-                            # If it's something else (like Enum class), skip or use default
-                            member_dict['role'] = 'member'  # default fallback
-                    members_list.append(TeamMembersResponse(**member_dict))
-                return {
-                    'members': members_list,
-                    'total': cached.get('total', 0),
-                    'limit': cached.get('limit'),
-                    'offset': cached.get('offset')
-                }
+                    try:
+                        # Email should always be in cached data now, but handle edge case
+                        if not member_dict.get('email'):
+                            logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
+                            continue
+                        
+                        # Ensure role is a string (not Enum class or instance)
+                        if 'role' in member_dict:
+                            role_value = member_dict['role']
+                            # If it's already a string, keep it; if it's an Enum, get its value
+                            if isinstance(role_value, TeamUserRole):
+                                member_dict['role'] = role_value.value
+                            elif not isinstance(role_value, str):
+                                # If it's something else (like Enum class), skip or use default
+                                member_dict['role'] = 'member'  # default fallback
+                        members_list.append(TeamMembersResponse(**member_dict))
+                    except Exception as e:
+                        logger.warning(f"Failed to reconstruct cached member {member_dict.get('id')}: {e}, will fetch from DB")
+                        # If cached data is invalid, fall through to fetch from database
+                        break
+                
+                # Only return cached data if we successfully reconstructed all members
+                if members_list and len(members_list) == len(cached.get('members', [])):
+                    return {
+                        'members': members_list,
+                        'total': cached.get('total', 0),
+                        'limit': cached.get('limit'),
+                        'offset': cached.get('offset')
+                    }
+                # If cached data is invalid or incomplete, fall through to fetch from database
         
         query = supabase.table('organization_members').select(
             'user_id, role, created_at',
@@ -431,13 +440,23 @@ class TeamService:
             
             user_info = users_cache.get(user_id_str)
             
+            # If not in cache, fetch from database (cache miss)
             if not user_info:
-                continue
+                try:
+                    user_info = self._get_user_info(UUID4(user_id_str))
+                    if user_info:
+                        users_cache[user_id_str] = user_info
+                    else:
+                        logger.warning(f"User {user_id_str} not found in profiles, skipping from team members")
+                        continue
+                except Exception as e:
+                    logger.error(f"Failed to fetch user info for {user_id_str}: {e}")
+                    continue
             
             # Email should always be in cache now, but handle edge case
             email = user_info.get('email')
             if not email:
-                logger.warning(f"User {user_id_str} has no email in cache, skipping from team members")
+                logger.warning(f"User {user_id_str} has no email, skipping from team members")
                 continue
             
             # Apply search filter if provided (filter on display_name and email from profiles)
@@ -918,6 +937,8 @@ class TeamService:
                     detail=f"Failed to batch get user info: {e}"
                 )
             
+            # Track which users were found in database
+            found_user_ids = set()
             for profile in response.data:
                 avatar_url = None
                 if profile.get('avatar_file_id'):
@@ -927,6 +948,7 @@ class TeamService:
                         pass
                 
                 user_id_str = str(profile['user_id'])
+                found_user_ids.add(user_id_str)
                 users_dict[user_id_str] = {
                     'id': profile['user_id'],
                     'display_name': profile['display_name'],
@@ -942,6 +964,11 @@ class TeamService:
                     'avatar_file_id': profile.get('avatar_file_id'),
                 }
                 UserCache.set_user(user_id_str, user_data_for_cache)
+            
+            # Log if some users were not found in profiles table
+            missing_user_ids = set(str(uid) for uid in uncached_user_ids) - found_user_ids
+            if missing_user_ids:
+                logger.warning(f"Users not found in profiles table: {missing_user_ids}")
         
         return users_dict
     
