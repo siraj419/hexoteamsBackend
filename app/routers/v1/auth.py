@@ -19,8 +19,7 @@ from app.schemas.auth import (
     AuthUpdateProfileResponse,
     AuthChangeAvatarResponse,
     AuthRemoveAvatarResponse,
-    User,
-    OAuthInitiateResponse
+    User
 )
 from app.services.auth import AuthService
 from app.services.files import FilesService
@@ -204,47 +203,4 @@ def remove_avatar(user: any = Depends(get_current_user)):
     """
     auth_service = AuthService()
     return auth_service.remove_avatar(user)
-
-@router.get("/oauth/google", response_model=OAuthInitiateResponse, status_code=status.HTTP_200_OK)
-def oauth_google():
-    """
-        Initiate Google OAuth flow and return redirect URL
-    """
-    auth_service = AuthService()
-    return auth_service.initiate_oauth("google")
-
-@router.get("/oauth/github", response_model=OAuthInitiateResponse, status_code=status.HTTP_200_OK)
-def oauth_github():
-    """
-        Initiate GitHub OAuth flow and return redirect URL
-    """
-    auth_service = AuthService()
-    return auth_service.initiate_oauth("github")
-
-@router.get("/oauth/callback/google")
-async def oauth_google_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    response: Response = None
-):
-    """
-        OAuth callback endpoint for Google
-        Handles the redirect from Google after user authentication
-    """
-    auth_service = AuthService()
-    return await auth_service.handle_oauth_callback(code, state, "google", response)
-
-@router.get("/oauth/callback/github")
-async def oauth_github_callback(
-    code: str = Query(...),
-    state: str = Query(...),
-    response: Response = None
-):
-    """
-        OAuth callback endpoint for GitHub
-        Handles the redirect from GitHub after user authentication
-    """
-    auth_service = AuthService()
-    return await auth_service.handle_oauth_callback(code, state, "github", response)
-
 

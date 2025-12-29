@@ -623,14 +623,28 @@ class ProjectService:
             seen_user_ids = set()
             if members_response.data:
                 user_ids = [UUID4(member['user_id']) for member in members_response.data]
+                
+                # Collect all unique user IDs for batch fetching
+                unique_user_ids = []
                 for user_id in user_ids:
                     user_id_str = str(user_id)
-                    # Skip duplicates
-                    if user_id_str in seen_user_ids:
-                        continue
-                    seen_user_ids.add(user_id_str)
-                    
-                    user_info = self._get_user_info_with_cache(user_id)
+                    if user_id_str not in seen_user_ids:
+                        seen_user_ids.add(user_id_str)
+                        unique_user_ids.append(user_id)
+                
+                # Batch fetch all user info
+                user_info_cache = {}
+                if unique_user_ids:
+                    user_info_cache = self._batch_get_user_info(unique_user_ids)
+                
+                # Build members list using batch-fetched data
+                for user_id in unique_user_ids:
+                    user_id_str = str(user_id)
+                    user_info = user_info_cache.get(user_id_str) or {
+                        'id': user_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
                     members.append(ProjectMemberSummary(
                         id=user_id,
                         display_name=user_info.get('display_name'),
@@ -728,17 +742,29 @@ class ProjectService:
                         user_task_counts[assignee_id] = user_task_counts.get(assignee_id, 0) + 1
             
             user_workloads = []
-            for user_id_str, task_count in user_task_counts.items():
-                user_id = UUID4(user_id_str)
-                user_info = self._get_user_info_with_cache(user_id)
-                percentage = (task_count / total_tasks * 100) if total_tasks > 0 else 0.0
-                user_workloads.append(UserWorkload(
-                    user_id=user_id,
-                    display_name=user_info.get('display_name'),
-                    avatar_url=user_info.get('avatar_url'),
-                    task_count=task_count,
-                    percentage=round(percentage, 2)
-                ))
+            if user_task_counts:
+                # Collect all user IDs for batch fetching
+                user_ids = [UUID4(user_id_str) for user_id_str in user_task_counts.keys()]
+                
+                # Batch fetch all user info
+                user_info_cache = self._batch_get_user_info(user_ids)
+                
+                # Build workloads using batch-fetched data
+                for user_id_str, task_count in user_task_counts.items():
+                    user_id = UUID4(user_id_str)
+                    user_info = user_info_cache.get(user_id_str) or {
+                        'id': user_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                    percentage = (task_count / total_tasks * 100) if total_tasks > 0 else 0.0
+                    user_workloads.append(UserWorkload(
+                        user_id=user_id,
+                        display_name=user_info.get('display_name'),
+                        avatar_url=user_info.get('avatar_url'),
+                        task_count=task_count,
+                        percentage=round(percentage, 2)
+                    ))
             
             team_workload = TeamWorkload(
                 assigned_percentage=round(assigned_percentage, 2),
@@ -856,6 +882,101 @@ class ProjectService:
                 'display_name': None,
                 'avatar_url': None
             }
+    
+    def _batch_get_user_info(self, user_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch fetch user information with Redis caching and avatar URLs.
+        This method optimizes N+1 queries by fetching all users in a single database call.
+        
+        Args:
+            user_ids: List of user IDs to fetch
+            
+        Returns:
+            Dict mapping user_id (as string) to user info dict with id, display_name, and avatar_url
+        """
+        if not user_ids:
+            return {}
+        
+        result = {}
+        user_ids_str = [str(uid) for uid in user_ids]
+        user_ids_to_fetch = []
+        
+        # First, try to get from cache
+        for user_id_str in user_ids_str:
+            try:
+                cached_user = UserCache.get_user(user_id_str)
+                if cached_user:
+                    avatar_url = None
+                    if cached_user.get('avatar_file_id'):
+                        try:
+                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                        except Exception as e:
+                            logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
+                    
+                    result[user_id_str] = {
+                        'id': cached_user.get('user_id') or cached_user.get('id'),
+                        'display_name': cached_user.get('display_name'),
+                        'avatar_url': avatar_url
+                    }
+                else:
+                    user_ids_to_fetch.append(user_id_str)
+            except Exception as e:
+                logger.warning(f"Error getting user {user_id_str} from cache: {e}")
+                user_ids_to_fetch.append(user_id_str)
+        
+        # Batch fetch missing users from database
+        if user_ids_to_fetch:
+            try:
+                user_response = supabase.table('profiles').select(
+                    'user_id, display_name, avatar_file_id'
+                ).in_('user_id', user_ids_to_fetch).execute()
+                
+                if user_response.data:
+                    for user in user_response.data:
+                        user_id_str = user['user_id']
+                        
+                        avatar_url = None
+                        if user.get('avatar_file_id'):
+                            try:
+                                avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
+                            except Exception as e:
+                                logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
+                        
+                        user_data_for_cache = {
+                            'user_id': user['user_id'],
+                            'display_name': user.get('display_name'),
+                            'avatar_file_id': user.get('avatar_file_id')
+                        }
+                        
+                        UserCache.set_user(user_id_str, user_data_for_cache)
+                        
+                        result[user_id_str] = {
+                            'id': user['user_id'],
+                            'display_name': user.get('display_name'),
+                            'avatar_url': avatar_url
+                        }
+                
+                # Set default for users not found in database
+                for user_id_str in user_ids_to_fetch:
+                    if user_id_str not in result:
+                        result[user_id_str] = {
+                            'id': user_id_str,
+                            'display_name': None,
+                            'avatar_url': None
+                        }
+                        
+            except Exception as e:
+                logger.error(f"Error batch fetching user info: {str(e)}")
+                # Set default for all failed fetches
+                for user_id_str in user_ids_to_fetch:
+                    if user_id_str not in result:
+                        result[user_id_str] = {
+                            'id': user_id_str,
+                            'display_name': None,
+                            'avatar_url': None
+                        }
+        
+        return result
     
     def _is_favourite_project(self, project_id: UUID4, user_id: Optional[UUID4]) -> bool:
         """

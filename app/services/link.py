@@ -12,9 +12,11 @@ from app.schemas.links import (
 )
 from app.core import supabase
 from app.utils import calculate_time_ago, apply_pagination
-from app.utils.redis_cache import ProjectSummaryCache
+from app.utils.redis_cache import ProjectSummaryCache, cache_service
 
 class LinkService:
+    CACHE_TTL_LINKS = 180  # 3 minutes
+    
     def __init__(self, user_timezone: str = 'utc'):
         self.user_timezone = user_timezone
     
@@ -39,6 +41,9 @@ class LinkService:
                 detail=f"Failed to create link: {e}"
             )
         
+        # Invalidate link caches
+        cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
+        
         if entity_type == LinkEntityType.PROJECT:
             ProjectSummaryCache.delete_summary(str(entity_id))
         
@@ -60,6 +65,14 @@ class LinkService:
         Get links for an entity with pagination.
         Optimized to fetch all data in a single query.
         """
+        # Build cache key
+        cache_key = f"links:list:{entity_type}:{entity_id}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return LinkGetPaginatedResponse(**cached)
+        
         query = supabase.table('links').select('*', count='exact').eq('entity_id', str(entity_id)).eq('entity_type', entity_type.value).order('created_at', desc=True)
         
         limit, offset, query = apply_pagination(query, limit, offset)
@@ -81,12 +94,17 @@ class LinkService:
             created_time=calculate_time_ago(link['created_at'], self.user_timezone),
         ) for link in response.data]
         
-        return LinkGetPaginatedResponse(
+        result = LinkGetPaginatedResponse(
             links=links,
             total=total_count,
             offset=offset,
             limit=limit,
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_LINKS)
+        
+        return result
     
     def update_link(
         self,
@@ -132,8 +150,14 @@ class LinkService:
                 detail="Link not found"
             )
         
-        if link_data and link_data.get('entity_type') == LinkEntityType.PROJECT.value:
-            ProjectSummaryCache.delete_summary(link_data['entity_id'])
+        # Invalidate link caches
+        if link_data:
+            entity_type = link_data.get('entity_type')
+            entity_id = link_data.get('entity_id')
+            cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
+            
+            if entity_type == LinkEntityType.PROJECT.value:
+                ProjectSummaryCache.delete_summary(entity_id)
         
         return LinkResponse(
             id=response.data[0]['id'],
@@ -173,8 +197,14 @@ class LinkService:
                 detail="Link not found"
             )
         
-        if link_data and link_data.get('entity_type') == LinkEntityType.PROJECT.value:
-            ProjectSummaryCache.delete_summary(link_data['entity_id'])
+        # Invalidate link caches
+        if link_data:
+            entity_type = link_data.get('entity_type')
+            entity_id = link_data.get('entity_id')
+            cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
+            
+            if entity_type == LinkEntityType.PROJECT.value:
+                ProjectSummaryCache.delete_summary(entity_id)
         
         return True
 
@@ -190,6 +220,9 @@ class LinkService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete all links: {e}"
             )
+        
+        # Invalidate link caches
+        cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
         
         if entity_type == LinkEntityType.PROJECT:
             ProjectSummaryCache.delete_summary(str(entity_id))

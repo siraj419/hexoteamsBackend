@@ -151,11 +151,3 @@ class AuthChangeAvatarResponse(BaseModel):
 
 class AuthRemoveAvatarResponse(BaseModel):
     message: str
-
-class OAuthInitiateResponse(BaseModel):
-    url: str
-
-class OAuthCallbackResponse(BaseModel):
-    access_token: str
-    expires_in: int
-    token_type: str = "Bearer"

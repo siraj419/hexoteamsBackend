@@ -12,11 +12,13 @@ from app.schemas.activities import (
 from app.services.files import FilesService
 from app.core import supabase
 from app.utils import calculate_time_ago, apply_pagination
-from app.utils.redis_cache import ProjectSummaryCache
+from app.utils.redis_cache import ProjectSummaryCache, cache_service
 
 logger = logging.getLogger(__name__)
 
 class ActivityService:
+    CACHE_TTL_ACTIVITIES = 120  # 2 minutes
+    
     def __init__(self, files_service: FilesService):
         self.files_service = files_service
         
@@ -56,6 +58,10 @@ class ActivityService:
                 detail=f"Failed to add activity: {str(e)}"
             )
         
+        # Invalidate activity caches
+        cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
+        cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
+        
         # Invalidate project summary cache for activities
         if activity_type == ActivityType.PROJECT:
             # Project activity - invalidate cache for the project
@@ -68,6 +74,8 @@ class ActivityService:
                     project_id = task_response.data[0].get('project_id')
                     if project_id:
                         ProjectSummaryCache.delete_summary(str(project_id))
+                        cache_service.invalidate_pattern(f"activities:list:{project_id}:*")
+                        cache_service.invalidate_pattern(f"activities:paginated:{project_id}:*")
             except Exception as e:
                 logger.warning(f"Failed to get project_id for task activity: {str(e)}")
         
@@ -80,6 +88,14 @@ class ActivityService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> List[ActivityResponse]:
+        # Build cache key
+        cache_key = f"activities:list:{entity_id}:{activity_type}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return [ActivityResponse(**item) for item in cached]
+        
         # For task activities: get only activities with activity_type='task' for that task
         # For project activities: get both activity_type='project' for project AND activity_type='task' for tasks in that project
         if activity_type == ActivityType.TASK:
@@ -149,6 +165,9 @@ class ActivityService:
                     activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
                 ))
             
+            # Cache the result
+            cache_service.set(cache_key, [a.model_dump(mode='json') for a in activities], ttl=self.CACHE_TTL_ACTIVITIES)
+            
             return activities
         
         # apply the pagination
@@ -177,8 +196,11 @@ class ActivityService:
                 user_display_name=profile.get('display_name', 'Unknown') if profile else 'Unknown',
                 user_avatar_url=avatar_url,
                 description=activity['description'],
-                activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
+                    activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
             ))
+        
+        # Cache the result
+        cache_service.set(cache_key, [a.model_dump(mode='json') for a in activities], ttl=self.CACHE_TTL_ACTIVITIES)
         
         return activities
     
@@ -195,6 +217,14 @@ class ActivityService:
         For projects: returns both project activities and task activities for tasks in that project
         Optimized to fetch all data in a single query with profile join.
         """
+        # Build cache key
+        cache_key = f"activities:paginated:{entity_id}:{activity_type}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return ActivityGetPaginatedResponse(**cached)
+        
         if activity_type == ActivityType.TASK:
             # Get only task activities for this task
             query = supabase.table('activities').select(
@@ -264,12 +294,17 @@ class ActivityService:
                     activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
                 ))
             
-            return ActivityGetPaginatedResponse(
+            result = ActivityGetPaginatedResponse(
                 activities=activities,
                 total=total_count,
                 offset=offset,
                 limit=limit,
             )
+            
+            # Cache the result
+            cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ACTIVITIES)
+            
+            return result
         
         # For task activities, use the query approach
         # apply the pagination
@@ -303,17 +338,29 @@ class ActivityService:
                 activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
             ))
         
-        return ActivityGetPaginatedResponse(
+        result = ActivityGetPaginatedResponse(
             activities=activities,
             total=total_count,
             offset=offset,
             limit=limit,
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ACTIVITIES)
+        
+        return result
 
     def delete_activity(
         self,
         activity_id: UUID4,
     ) -> bool:
+        # Get activity to find entity_id for cache invalidation
+        try:
+            activity_response = supabase.table('activities').select('entity_id, activity_type').eq('id', str(activity_id)).execute()
+            entity_id = activity_response.data[0]['entity_id'] if activity_response.data else None
+        except:
+            entity_id = None
+        
         try:
             supabase.table('activities').delete().eq('id', activity_id).execute()
         except Exception as e:
@@ -321,6 +368,12 @@ class ActivityService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete activity: {e}"
             )
+        
+        # Invalidate activity caches
+        if entity_id:
+            cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
+            cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
+        
         return True
     
     def delete_all(
@@ -335,4 +388,9 @@ class ActivityService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete all activities: {e}"
             )
+        
+        # Invalidate activity caches
+        cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
+        cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
+        
         return True

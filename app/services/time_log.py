@@ -20,6 +20,7 @@ from app.schemas.time_logs.time_logs import (
     TimeLogStatus,
 )
 from app.core import supabase
+from app.utils.redis_cache import cache_service
 
 
 def format_duration(seconds: float) -> str:
@@ -32,8 +33,19 @@ def format_duration(seconds: float) -> str:
 
 
 class TimeLogService:
+    CACHE_TTL_ACTIVE = 30  # 30 seconds for active time log (real-time)
+    CACHE_TTL_LIST = 180  # 3 minutes for lists
+    CACHE_TTL_SINGLE = 300  # 5 minutes for single time log
+    
     def __init__(self):
         pass
+    
+    def _invalidate_time_log_caches(self, user_id: UUID4, time_log_id: Optional[UUID4] = None):
+        """Invalidate time log caches"""
+        cache_service.delete(f"time_log:active:{user_id}")
+        cache_service.invalidate_pattern(f"time_logs:list:{user_id}:*")
+        if time_log_id:
+            cache_service.delete(f"time_log:{time_log_id}")
     
     def start_time_log(
         self,
@@ -101,7 +113,7 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
-        return TimeLogStartResponse(
+        result = TimeLogStartResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
@@ -116,6 +128,11 @@ class TimeLogService:
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
         )
+        
+        # Invalidate caches
+        self._invalidate_time_log_caches(user_id)
+        
+        return result
     
     def create_time_log(
         self,
@@ -196,7 +213,7 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
-        return TimeLogCreateResponse(
+        result = TimeLogCreateResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
@@ -211,6 +228,11 @@ class TimeLogService:
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
         )
+        
+        # Invalidate caches
+        self._invalidate_time_log_caches(user_id)
+        
+        return result
     
     def stop_time_log(
         self,
@@ -286,7 +308,7 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
-        return TimeLogStopResponse(
+        result = TimeLogStopResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
@@ -301,8 +323,22 @@ class TimeLogService:
             created_at=response.data[0]['created_at'],
             updated_at=response.data[0]['updated_at'],
         )
+        
+        # Invalidate caches
+        self._invalidate_time_log_caches(user_id, time_log_id)
+        
+        return result
     
     def get_active_time_log(self, user_id: UUID4) -> Optional[TimeLogGetResponse]:
+        cache_key = f"time_log:active:{user_id}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached is not None:
+            if cached == "null":
+                return None
+            return TimeLogGetResponse(**cached)
+        
         try:
             response = supabase.table('time_logs').select('*').eq('created_by', str(user_id)).eq('status', TimeLogStatus.RUNNING.value).execute()
         except Exception as e:
@@ -312,6 +348,8 @@ class TimeLogService:
             )
         
         if not response.data or len(response.data) == 0:
+            # Cache None result
+            cache_service.set(cache_key, "null", ttl=self.CACHE_TTL_ACTIVE)
             return None
         
         log = response.data[0]
@@ -333,7 +371,7 @@ class TimeLogService:
         
         elapsed_duration = (current_datetime - started_datetime).total_seconds()
         
-        return TimeLogGetResponse(
+        result = TimeLogGetResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
@@ -348,6 +386,11 @@ class TimeLogService:
             created_at=log['created_at'],
             updated_at=log['updated_at'],
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ACTIVE)
+        
+        return result
     
     def get_time_logs(
         self,
@@ -360,6 +403,14 @@ class TimeLogService:
         limit: Optional[int] = 100,
         offset: Optional[int] = 0,
     ) -> TimeLogListResponse:
+        # Build cache key
+        cache_key = f"time_logs:list:{user_id}:{project_id}:{task_id}:{from_date}:{to_date}:{status_filter}:{limit}:{offset}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return TimeLogListResponse(**cached)
+        
         query = supabase.table('time_logs').select('*', count='exact')
         
         if user_id:
@@ -409,14 +460,26 @@ class TimeLogService:
         total_count = response.count if response.count else 0
         total_duration = sum(log.duration_seconds for log in time_logs)
         
-        return TimeLogListResponse(
+        result = TimeLogListResponse(
             time_logs=time_logs,
             total_count=total_count,
             total_duration_seconds=total_duration,
             total_duration_formatted=format_duration(total_duration),
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_LIST)
+        
+        return result
     
     def get_time_log(self, time_log_id: UUID4, user_id: UUID4) -> TimeLogGetResponse:
+        cache_key = f"time_log:{time_log_id}"
+        
+        # Check cache first
+        cached = cache_service.get(cache_key)
+        if cached:
+            return TimeLogGetResponse(**cached)
+        
         try:
             response = supabase.table('time_logs').select('*').eq('id', str(time_log_id)).execute()
         except Exception as e:
@@ -440,7 +503,7 @@ class TimeLogService:
             )
         
         duration_seconds = log['duration_seconds']
-        return TimeLogGetResponse(
+        result = TimeLogGetResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
@@ -455,6 +518,11 @@ class TimeLogService:
             created_at=log['created_at'],
             updated_at=log['updated_at'],
         )
+        
+        # Cache the result
+        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_SINGLE)
+        
+        return result
     
     def update_time_log(
         self,
@@ -517,7 +585,7 @@ class TimeLogService:
         
         log = response.data[0]
         duration_seconds = log['duration_seconds']
-        return TimeLogUpdateResponse(
+        result = TimeLogUpdateResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
@@ -532,6 +600,11 @@ class TimeLogService:
             created_at=log['created_at'],
             updated_at=log['updated_at'],
         )
+        
+        # Invalidate caches
+        self._invalidate_time_log_caches(user_id, time_log_id)
+        
+        return result
     
     def delete_time_log(self, time_log_id: UUID4, user_id: UUID4) -> TimeLogDeleteResponse:
         try:
@@ -566,6 +639,9 @@ class TimeLogService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Time log not found"
             )
+        
+        # Invalidate caches
+        self._invalidate_time_log_caches(user_id, time_log_id)
         
         return TimeLogDeleteResponse(
             success=True,
