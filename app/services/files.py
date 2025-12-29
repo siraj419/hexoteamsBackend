@@ -443,7 +443,7 @@ class FilesService:
         )
         
         # Cache the result
-        cache_service.set(cache_key, file_data.model_dump(), ttl=self.CACHE_TTL_FILE)
+        cache_service.set(cache_key, file_data.model_dump(mode='json'), ttl=self.CACHE_TTL_FILE)
         
         return file_data
 

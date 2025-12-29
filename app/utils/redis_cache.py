@@ -2,7 +2,8 @@ import redis
 import json
 import logging
 from typing import Optional, Dict, Any, List, Union, Callable
-from datetime import timedelta
+from datetime import timedelta, datetime, date
+from uuid import UUID
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -199,8 +200,24 @@ class CacheService:
         return f"{self.namespace}:{key}"
     
     def _serialize(self, value: Any) -> str:
-        """Serialize value to JSON string."""
-        return json.dumps(value)
+        """Serialize value to JSON string with support for UUIDs, datetime, and other types."""
+        return json.dumps(value, default=self._json_serializer)
+    
+    def _json_serializer(self, obj: Any) -> Any:
+        """Custom JSON serializer for non-serializable types."""
+        if isinstance(obj, UUID):
+            return str(obj)
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif hasattr(obj, '__dict__'):
+            # For objects with __dict__, convert to dict
+            return obj.__dict__
+        elif hasattr(obj, 'model_dump'):
+            # For Pydantic models, use model_dump with json mode
+            return obj.model_dump(mode='json')
+        else:
+            # Fallback: try to convert to string
+            return str(obj)
     
     def _deserialize(self, value: str) -> Any:
         """Deserialize JSON string to Python object."""
