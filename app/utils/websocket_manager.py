@@ -214,6 +214,26 @@ class ConnectionManager:
             logger.error(f"Failed to get connections from Redis: {e}")
             return set()
     
+    def _get_local_connections_by_type(self, connection_type: str, **filters) -> Set[str]:
+        """Get local connection IDs filtered by type and optional filters"""
+        local_conn_ids = set()
+        
+        for connection_id, metadata in self.connection_metadata.items():
+            if metadata.get("connection_type") != connection_type:
+                continue
+            
+            # Apply filters
+            match = True
+            for key, value in filters.items():
+                if metadata.get(key) != value:
+                    match = False
+                    break
+            
+            if match and connection_id in self.local_connections:
+                local_conn_ids.add(connection_id)
+        
+        return local_conn_ids
+    
     async def connect_project(self, websocket: WebSocket, project_id: str, user_id: str):
         """Connect a user to a project chat"""
         await websocket.accept()
@@ -383,8 +403,15 @@ class ConnectionManager:
         sender_id: str = None
     ):
         """Broadcast message to all connections in a project"""
+        # Get connections from Redis
         key = self._get_redis_key("project", project_id)
-        connection_ids = self._get_connections_from_redis(key)
+        redis_connection_ids = self._get_connections_from_redis(key)
+        
+        # Get local connections as fallback
+        local_connection_ids = self._get_local_connections_by_type("project", project_id=project_id)
+        
+        # Combine both sets (Redis + local)
+        connection_ids = redis_connection_ids | local_connection_ids
         
         if not connection_ids:
             return
@@ -437,8 +464,16 @@ class ConnectionManager:
     ):
         """Broadcast message to all connections in a DM conversation"""
         conversation_id = str(conversation_id).lower().strip()
+        
+        # Get connections from Redis
         key = self._get_redis_key("dm", conversation_id)
-        connection_ids = self._get_connections_from_redis(key)
+        redis_connection_ids = self._get_connections_from_redis(key)
+        
+        # Get local connections as fallback
+        local_connection_ids = self._get_local_connections_by_type("dm", conversation_id=conversation_id)
+        
+        # Combine both sets (Redis + local)
+        connection_ids = redis_connection_ids | local_connection_ids
         
         if not connection_ids:
             logger.debug(f"No active DM connections found for conversation_id: {conversation_id}")
@@ -485,8 +520,17 @@ class ConnectionManager:
     
     async def send_to_user(self, user_id: str, message: dict):
         """Send message to all connections of a user"""
+        # Get connections from Redis
         key = self._get_redis_key("user", user_id)
-        connection_ids = self._get_connections_from_redis(key)
+        redis_connection_ids = self._get_connections_from_redis(key)
+        
+        # Get local connections as fallback
+        local_connection_ids = self._get_local_connections_by_type("project", user_id=user_id)
+        local_connection_ids |= self._get_local_connections_by_type("dm", user_id=user_id)
+        local_connection_ids |= self._get_local_connections_by_type("inbox", user_id=user_id)
+        
+        # Combine both sets (Redis + local)
+        connection_ids = redis_connection_ids | local_connection_ids
         
         if not connection_ids:
             return
@@ -529,11 +573,26 @@ class ConnectionManager:
     async def broadcast_inbox_notification(self, org_id: str, user_id: str, message: dict):
         """Broadcast inbox notification to user's connections for specific org"""
         connection_key = f"{org_id}:{user_id}"
+        
+        # Get connections from Redis
         key = self._get_redis_key("inbox", connection_key)
-        connection_ids = self._get_connections_from_redis(key)
+        redis_connection_ids = self._get_connections_from_redis(key)
+        
+        # Get local connections as fallback
+        local_connection_ids = self._get_local_connections_by_type("inbox", org_id=org_id, user_id=user_id)
+        
+        # Combine both sets (Redis + local)
+        connection_ids = redis_connection_ids | local_connection_ids
         
         if not connection_ids:
-            logger.info(f"No active inbox connections for {connection_key}")
+            # Debug: log all local connections and their metadata
+            all_local = list(self.local_connections.keys())
+            inbox_local = [(cid, self.connection_metadata.get(cid, {})) for cid in all_local 
+                          if self.connection_metadata.get(cid, {}).get("connection_type") == "inbox"]
+            logger.info(f"No active inbox connections for inbox:{connection_key}. "
+                       f"Total local connections: {len(all_local)}, "
+                       f"Inbox local connections: {len(inbox_local)}, "
+                       f"Redis connections: {len(redis_connection_ids)}")
             return
         
         disconnected = []
