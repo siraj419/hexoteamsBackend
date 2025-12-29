@@ -548,20 +548,27 @@ class FilesService:
     def _get_user_profile(self, user_id: UUID4) -> FileUploadedByUserGetResponse:
         # Use UserCache for consistency
         cached_user = UserCache.get_user(str(user_id))
-        if cached_user:
+        if cached_user and isinstance(cached_user, dict):
             avatar_url = None
-            if cached_user.get('avatar_file_id'):
+            avatar_file_id = cached_user.get('avatar_file_id')
+            if avatar_file_id:
                 try:
-                    avatar_url = self.get_file_url(UUID4(cached_user['avatar_file_id']))
+                    avatar_url = self.get_file_url(UUID4(avatar_file_id))
                 except HTTPException:
                     pass
             
             # Handle both 'id' and 'user_id' keys for cache compatibility
-            user_id_value = cached_user.get('id') or cached_user.get('user_id') or str(user_id)
+            # Fallback to user_id parameter if neither key exists
+            user_id_value = cached_user.get('id') or cached_user.get('user_id')
+            if not user_id_value:
+                # If cache doesn't have id, use the provided user_id
+                user_id_value = str(user_id)
+            
+            display_name = cached_user.get('display_name', '')
             
             return FileUploadedByUserGetResponse(
                 id=UUID4(user_id_value),
-                display_name=cached_user.get('display_name', ''),
+                display_name=display_name,
                 avatar_url=avatar_url,
             )
         
