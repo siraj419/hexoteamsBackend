@@ -28,13 +28,13 @@ time_log_service = TimeLogService()
     response_model=TimeLogCreateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a time log manually",
-    description="Manually create a time log entry with specific start time, stop time, and duration. Either stoped_at or duration_seconds must be provided.",
+    description="Manually create a time log entry with specific start time, stop time, and duration. Either stoped_at or duration_seconds must be provided. Project must belong to the current organization.",
 )
 def create_time_log(
     time_log_request: TimeLogCreateRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.create_time_log(time_log_request, UUID4(organization['member_user_id']))
+    return time_log_service.create_time_log(time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.post(
@@ -42,39 +42,39 @@ def create_time_log(
     response_model=TimeLogStartResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Start a new time log",
-    description="Start tracking time for a specific task and project. Only one time log can be active at a time per user.",
+    description="Start tracking time for a specific task and project. Only one time log can be active at a time per user. Project must belong to the current organization.",
 )
 def start_time_log(
     time_log_request: TimeLogStartRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.start_time_log(time_log_request, UUID4(organization['member_user_id']))
+    return time_log_service.start_time_log(time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.post(
     "/{time_log_id}/stop",
     response_model=TimeLogStopResponse,
     summary="Stop a running time log",
-    description="Stop the currently running time log and calculate the duration.",
+    description="Stop the currently running time log and calculate the duration. Time log must belong to a project in the current organization.",
 )
 def stop_time_log(
     time_log_id: UUID4,
     stop_request: TimeLogStopRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.stop_time_log(time_log_id, stop_request, UUID4(organization['member_user_id']))
+    return time_log_service.stop_time_log(time_log_id, stop_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.get(
     "/active",
     response_model=Optional[TimeLogGetResponse],
     summary="Get active time log",
-    description="Get the currently running time log for the authenticated user.",
+    description="Get the currently running time log for the authenticated user in the current organization.",
 )
 def get_active_time_log(
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.get_active_time_log(UUID4(organization['member_user_id']))
+    return time_log_service.get_active_time_log(UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.get(
