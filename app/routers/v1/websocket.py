@@ -326,24 +326,11 @@ async def inbox_websocket(
         await websocket.close(code=4003)
         return
     
-    await websocket.accept()
-    
-    connection_key = f"inbox:{org_id}:{user_id}"
-    
-    if connection_key not in manager.inbox_connections:
-        manager.inbox_connections[connection_key] = []
-    
-    manager.inbox_connections[connection_key].append(websocket)
-    logger.info(f"User {user_id} connected to inbox for org {org_id}. Connection key: {connection_key}. Total inbox connections: {len(manager.inbox_connections)}")
+    await manager.connect_inbox(websocket, org_id, user_id)
     
     try:
         while True:
             data = await websocket.receive_text()
             logger.debug(f"Received inbox WS message: {data}")
     except WebSocketDisconnect:
-        if connection_key in manager.inbox_connections:
-            if websocket in manager.inbox_connections[connection_key]:
-                manager.inbox_connections[connection_key].remove(websocket)
-            if not manager.inbox_connections[connection_key]:
-                del manager.inbox_connections[connection_key]
-        logger.info(f"User {user_id} disconnected from inbox for org {org_id}")
+        manager.disconnect_inbox(websocket, org_id, user_id)

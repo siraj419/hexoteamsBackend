@@ -1,80 +1,415 @@
 from fastapi import WebSocket
-from typing import Dict, Set
-from pydantic import UUID4
+from typing import Dict, Optional, Set
 import json
 import logging
+import uuid
+import os
+from datetime import datetime, timezone
+from app.utils.redis_cache import redis_client
 
 logger = logging.getLogger(__name__)
 
+# Generate unique instance ID for this server instance
+INSTANCE_ID = os.environ.get("INSTANCE_ID", str(uuid.uuid4()))
+
+# Connection TTL in seconds (1 hour)
+CONNECTION_TTL = 3600
+
 
 class ConnectionManager:
-    """Manages WebSocket connections for real-time chat"""
+    """Manages WebSocket connections using Redis for distributed storage"""
     
     def __init__(self):
-        # project_id -> set of (user_id, websocket)
-        self.project_connections: Dict[str, Set[tuple]] = {}
-        # conversation_id -> set of (user_id, websocket)
-        self.dm_connections: Dict[str, Set[tuple]] = {}
-        # user_id -> list of websockets (user can have multiple tabs)
-        self.user_connections: Dict[str, list] = {}
-        # inbox connections: "inbox:{org_id}:{user_id}" -> list of websockets
-        self.inbox_connections: Dict[str, list] = {}
+        # Local mapping: connection_id -> websocket object
+        # WebSocket objects cannot be serialized, so we keep them in memory
+        self.local_connections: Dict[str, WebSocket] = {}
+        # Local mapping: connection_id -> connection metadata
+        self.connection_metadata: Dict[str, dict] = {}
+        
+        # Initialize Redis pub/sub for cross-instance communication
+        self._init_pubsub()
+    
+    def _init_pubsub(self):
+        """Initialize Redis pub/sub channels for cross-instance messaging"""
+        if not redis_client:
+            self.pubsub = None
+            return
+        
+        try:
+            # Note: Pub/sub listener would need to run in a background task
+            # For now, we use direct Redis publish for cross-instance communication
+            # Each instance can check if connections are local before publishing
+            self.pubsub = None
+            logger.info("Redis pub/sub available for WebSocket broadcasting")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis pub/sub: {e}")
+            self.pubsub = None
+    
+    def _generate_connection_id(self) -> str:
+        """Generate unique connection ID"""
+        return f"{INSTANCE_ID}:{uuid.uuid4().hex}"
+    
+    def _get_redis_key(self, key_type: str, identifier: str) -> str:
+        """Build Redis key with namespace"""
+        return f"ws:{key_type}:{identifier}"
+    
+    def _store_connection_metadata(
+        self, 
+        connection_id: str, 
+        user_id: str, 
+        connection_type: str,
+        **kwargs
+    ) -> bool:
+        """Store connection metadata in Redis"""
+        if not redis_client:
+            return False
+        
+        try:
+            metadata = {
+                "connection_id": connection_id,
+                "user_id": user_id,
+                "connection_type": connection_type,
+                "instance_id": INSTANCE_ID,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                **kwargs
+            }
+            
+            # Store connection metadata with TTL
+            key = self._get_redis_key("connection", connection_id)
+            redis_client.setex(
+                key,
+                CONNECTION_TTL,
+                json.dumps(metadata)
+            )
+            
+            # Add to appropriate sets based on connection type
+            if connection_type == "project" and "project_id" in kwargs:
+                project_id = kwargs["project_id"]
+                redis_client.sadd(
+                    self._get_redis_key("project", project_id),
+                    connection_id
+                )
+                redis_client.expire(
+                    self._get_redis_key("project", project_id),
+                    CONNECTION_TTL
+                )
+            
+            elif connection_type == "dm" and "conversation_id" in kwargs:
+                conversation_id = kwargs["conversation_id"]
+                redis_client.sadd(
+                    self._get_redis_key("dm", conversation_id),
+                    connection_id
+                )
+                redis_client.expire(
+                    self._get_redis_key("dm", conversation_id),
+                    CONNECTION_TTL
+                )
+            
+            elif connection_type == "inbox" and "org_id" in kwargs:
+                org_id = kwargs["org_id"]
+                connection_key = f"{org_id}:{user_id}"
+                redis_client.sadd(
+                    self._get_redis_key("inbox", connection_key),
+                    connection_id
+                )
+                redis_client.expire(
+                    self._get_redis_key("inbox", connection_key),
+                    CONNECTION_TTL
+                )
+            
+            # Always track user connections
+            redis_client.sadd(
+                self._get_redis_key("user", user_id),
+                connection_id
+            )
+            redis_client.expire(
+                self._get_redis_key("user", user_id),
+                CONNECTION_TTL
+            )
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to store connection metadata: {e}")
+            return False
+    
+    def _remove_connection_metadata(self, connection_id: str, metadata: dict) -> bool:
+        """Remove connection metadata from Redis"""
+        if not redis_client:
+            return False
+        
+        try:
+            # Remove connection metadata
+            key = self._get_redis_key("connection", connection_id)
+            redis_client.delete(key)
+            
+            connection_type = metadata.get("connection_type")
+            user_id = metadata.get("user_id")
+            
+            # Remove from appropriate sets
+            if connection_type == "project" and "project_id" in metadata:
+                project_id = metadata["project_id"]
+                redis_client.srem(
+                    self._get_redis_key("project", project_id),
+                    connection_id
+                )
+            
+            elif connection_type == "dm" and "conversation_id" in metadata:
+                conversation_id = metadata["conversation_id"]
+                redis_client.srem(
+                    self._get_redis_key("dm", conversation_id),
+                    connection_id
+                )
+            
+            elif connection_type == "inbox" and "org_id" in metadata:
+                org_id = metadata["org_id"]
+                connection_key = f"{org_id}:{user_id}"
+                redis_client.srem(
+                    self._get_redis_key("inbox", connection_key),
+                    connection_id
+                )
+            
+            # Remove from user connections
+            if user_id:
+                redis_client.srem(
+                    self._get_redis_key("user", user_id),
+                    connection_id
+                )
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove connection metadata: {e}")
+            return False
+    
+    def _get_connection_metadata(self, connection_id: str) -> Optional[dict]:
+        """Get connection metadata from Redis or local cache"""
+        # Check local cache first
+        if connection_id in self.connection_metadata:
+            return self.connection_metadata[connection_id]
+        
+        if not redis_client:
+            return None
+        
+        try:
+            key = self._get_redis_key("connection", connection_id)
+            data = redis_client.get(key)
+            if data:
+                metadata = json.loads(data)
+                # Cache locally
+                self.connection_metadata[connection_id] = metadata
+                return metadata
+        except Exception as e:
+            logger.error(f"Failed to get connection metadata: {e}")
+        
+        return None
+    
+    def _get_connections_from_redis(self, key: str) -> Set[str]:
+        """Get all connection IDs from a Redis set"""
+        if not redis_client:
+            return set()
+        
+        try:
+            members = redis_client.smembers(key)
+            return set(members) if members else set()
+        except Exception as e:
+            logger.error(f"Failed to get connections from Redis: {e}")
+            return set()
     
     async def connect_project(self, websocket: WebSocket, project_id: str, user_id: str):
+        """Connect a user to a project chat"""
         await websocket.accept()
-        if project_id not in self.project_connections:
-            self.project_connections[project_id] = set()
-        self.project_connections[project_id].add((user_id, websocket))
-        self._track_user_connection(user_id, websocket)
-        logger.info(f"User {user_id} connected to project {project_id}")
+        
+        connection_id = self._generate_connection_id()
+        
+        # Store websocket locally
+        self.local_connections[connection_id] = websocket
+        
+        # Store metadata in Redis
+        metadata = {
+            "project_id": project_id,
+            "user_id": user_id,
+            "connection_type": "project"
+        }
+        self.connection_metadata[connection_id] = metadata
+        self._store_connection_metadata(connection_id, user_id, "project", project_id=project_id)
+        
+        logger.info(f"User {user_id} connected to project {project_id} (connection: {connection_id})")
     
     async def connect_dm(self, websocket: WebSocket, conversation_id: str, user_id: str):
+        """Connect a user to a direct message conversation"""
         await websocket.accept()
-        # Normalize conversation_id for consistent storage
+        
         conversation_id = str(conversation_id).lower().strip()
-        if conversation_id not in self.dm_connections:
-            self.dm_connections[conversation_id] = set()
-        self.dm_connections[conversation_id].add((user_id, websocket))
-        self._track_user_connection(user_id, websocket)
-        logger.info(f"User {user_id} connected to conversation {conversation_id}")
+        connection_id = self._generate_connection_id()
+        
+        # Store websocket locally
+        self.local_connections[connection_id] = websocket
+        
+        # Store metadata in Redis
+        metadata = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "connection_type": "dm"
+        }
+        self.connection_metadata[connection_id] = metadata
+        self._store_connection_metadata(connection_id, user_id, "dm", conversation_id=conversation_id)
+        
+        logger.info(f"User {user_id} connected to conversation {conversation_id} (connection: {connection_id})")
     
     def disconnect_project(self, websocket: WebSocket, project_id: str, user_id: str):
-        if project_id in self.project_connections:
-            self.project_connections[project_id].discard((user_id, websocket))
-            if not self.project_connections[project_id]:
-                del self.project_connections[project_id]
-        self._untrack_user_connection(user_id, websocket)
-        logger.info(f"User {user_id} disconnected from project {project_id}")
+        """Disconnect a user from a project chat"""
+        # Find connection ID by websocket
+        connection_id = None
+        for cid, ws in self.local_connections.items():
+            if ws == websocket:
+                connection_id = cid
+                break
+        
+        if not connection_id:
+            logger.warning(f"Connection not found for project {project_id}, user {user_id}")
+            return
+        
+        # Get metadata
+        metadata = self.connection_metadata.get(connection_id, {})
+        
+        # Remove from local storage
+        if connection_id in self.local_connections:
+            del self.local_connections[connection_id]
+        if connection_id in self.connection_metadata:
+            del self.connection_metadata[connection_id]
+        
+        # Remove from Redis
+        self._remove_connection_metadata(connection_id, metadata)
+        
+        logger.info(f"User {user_id} disconnected from project {project_id} (connection: {connection_id})")
     
     def disconnect_dm(self, websocket: WebSocket, conversation_id: str, user_id: str):
-        # Normalize conversation_id for consistent lookup
+        """Disconnect a user from a direct message conversation"""
         conversation_id = str(conversation_id).lower().strip()
-        if conversation_id in self.dm_connections:
-            self.dm_connections[conversation_id].discard((user_id, websocket))
-            if not self.dm_connections[conversation_id]:
-                del self.dm_connections[conversation_id]
-        self._untrack_user_connection(user_id, websocket)
-        logger.info(f"User {user_id} disconnected from conversation {conversation_id}")
+        
+        # Find connection ID by websocket
+        connection_id = None
+        for cid, ws in self.local_connections.items():
+            if ws == websocket:
+                connection_id = cid
+                break
+        
+        if not connection_id:
+            logger.warning(f"Connection not found for conversation {conversation_id}, user {user_id}")
+            return
+        
+        # Get metadata
+        metadata = self.connection_metadata.get(connection_id, {})
+        
+        # Remove from local storage
+        if connection_id in self.local_connections:
+            del self.local_connections[connection_id]
+        if connection_id in self.connection_metadata:
+            del self.connection_metadata[connection_id]
+        
+        # Remove from Redis
+        self._remove_connection_metadata(connection_id, metadata)
+        
+        logger.info(f"User {user_id} disconnected from conversation {conversation_id} (connection: {connection_id})")
+    
+    def disconnect_inbox(self, websocket: WebSocket, org_id: str, user_id: str):
+        """Disconnect a user from inbox notifications"""
+        connection_key = f"inbox:{org_id}:{user_id}"
+        
+        # Find connection ID by websocket
+        connection_id = None
+        for cid, ws in self.local_connections.items():
+            if ws == websocket:
+                connection_id = cid
+                break
+        
+        if not connection_id:
+            logger.warning(f"Connection not found for inbox {connection_key}")
+            return
+        
+        # Get metadata
+        metadata = self.connection_metadata.get(connection_id, {})
+        
+        # Remove from local storage
+        if connection_id in self.local_connections:
+            del self.local_connections[connection_id]
+        if connection_id in self.connection_metadata:
+            del self.connection_metadata[connection_id]
+        
+        # Remove from Redis
+        self._remove_connection_metadata(connection_id, metadata)
+        
+        logger.info(f"User {user_id} disconnected from inbox for org {org_id} (connection: {connection_id})")
+    
+    async def _send_to_connection(self, connection_id: str, message: dict) -> bool:
+        """Send message to a specific connection"""
+        # Check if connection is local
+        if connection_id in self.local_connections:
+            try:
+                websocket = self.local_connections[connection_id]
+                data = json.dumps(message)
+                await websocket.send_text(data)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send to local connection {connection_id}: {e}")
+                # Clean up failed connection
+                if connection_id in self.local_connections:
+                    metadata = self.connection_metadata.get(connection_id, {})
+                    del self.local_connections[connection_id]
+                    if connection_id in self.connection_metadata:
+                        del self.connection_metadata[connection_id]
+                    self._remove_connection_metadata(connection_id, metadata)
+                return False
+        
+        # Connection is on another instance
+        # Note: For full cross-instance support, you'd need a pub/sub listener
+        # For now, we log that the connection is on another instance
+        metadata = self._get_connection_metadata(connection_id)
+        if metadata:
+            instance_id = metadata.get("instance_id")
+            if instance_id != INSTANCE_ID:
+                logger.debug(f"Connection {connection_id} is on instance {instance_id}, not local")
+                # In a multi-instance setup, you'd publish to Redis pub/sub here
+                # and have each instance check if the connection is local
+                # For now, we return False as the connection is not local
+                return False
+        
+        return False
     
     async def broadcast_to_project(
-        self, project_id: str, message: dict, exclude_user: str = None, sender_id: str = None):
-        if project_id not in self.project_connections:
+        self, 
+        project_id: str, 
+        message: dict, 
+        exclude_user: str = None, 
+        sender_id: str = None
+    ):
+        """Broadcast message to all connections in a project"""
+        key = self._get_redis_key("project", project_id)
+        connection_ids = self._get_connections_from_redis(key)
+        
+        if not connection_ids:
             return
         
         disconnected = []
         
-        for user_id, websocket in self.project_connections[project_id]:
+        for connection_id in connection_ids:
+            metadata = self._get_connection_metadata(connection_id)
+            if not metadata:
+                disconnected.append(connection_id)
+                continue
+            
+            user_id = metadata.get("user_id")
+            
+            # Skip excluded user
             if exclude_user and str(user_id).lower().strip() == str(exclude_user).lower().strip():
                 continue
             
+            # Personalize message
             personalized_message = message.copy()
             if sender_id:
-                # Normalize both IDs to lowercase strings for comparison
                 normalized_user_id = str(user_id).lower().strip()
                 normalized_sender_id = str(sender_id).lower().strip()
                 is_own = (normalized_user_id == normalized_sender_id)
                 
-                # Set appropriate field based on message type
                 if message.get('type') in ['message', 'message_edited', 'message_deleted']:
                     personalized_message['is_own_message'] = is_own
                 else:
@@ -82,38 +417,54 @@ class ConnectionManager:
                 
                 personalized_message['sender_id'] = sender_id
             
-            data = json.dumps(personalized_message)
-            try:
-                await websocket.send_text(data)
-            except Exception as e:
-                logger.error(f"Failed to send to user {user_id}: {e}")
-                disconnected.append((user_id, websocket))
+            # Send message
+            success = await self._send_to_connection(connection_id, personalized_message)
+            if not success:
+                disconnected.append(connection_id)
         
-        for conn in disconnected:
-            self.project_connections[project_id].discard(conn)
+        # Clean up disconnected connections
+        for connection_id in disconnected:
+            metadata = self._get_connection_metadata(connection_id)
+            if metadata:
+                self._remove_connection_metadata(connection_id, metadata)
     
-    async def broadcast_to_dm(self, conversation_id: str, message: dict, exclude_user: str = None, sender_id: str = None):
-        # Normalize conversation_id to string and lowercase for consistent lookup
+    async def broadcast_to_dm(
+        self, 
+        conversation_id: str, 
+        message: dict, 
+        exclude_user: str = None, 
+        sender_id: str = None
+    ):
+        """Broadcast message to all connections in a DM conversation"""
         conversation_id = str(conversation_id).lower().strip()
+        key = self._get_redis_key("dm", conversation_id)
+        connection_ids = self._get_connections_from_redis(key)
         
-        if conversation_id not in self.dm_connections:
+        if not connection_ids:
             logger.debug(f"No active DM connections found for conversation_id: {conversation_id}")
             return
         
         disconnected = []
         
-        for user_id, websocket in self.dm_connections[conversation_id]:
+        for connection_id in connection_ids:
+            metadata = self._get_connection_metadata(connection_id)
+            if not metadata:
+                disconnected.append(connection_id)
+                continue
+            
+            user_id = metadata.get("user_id")
+            
+            # Skip excluded user
             if exclude_user and str(user_id).lower().strip() == str(exclude_user).lower().strip():
                 continue
             
+            # Personalize message
             personalized_message = message.copy()
             if sender_id:
-                # Normalize both IDs to lowercase strings for comparison
                 normalized_user_id = str(user_id).lower().strip()
                 normalized_sender_id = str(sender_id).lower().strip()
                 is_own = (normalized_user_id == normalized_sender_id)
                 
-                # Set appropriate field based on message type
                 if message.get('type') in ['message', 'message_edited', 'message_deleted']:
                     personalized_message['is_own_message'] = is_own
                 else:
@@ -121,71 +472,140 @@ class ConnectionManager:
                 
                 personalized_message['sender_id'] = sender_id
             
-            data = json.dumps(personalized_message)
-            try:
-                await websocket.send_text(data)
-            except Exception as e:
-                logger.error(f"Failed to send to user {user_id}: {e}")
-                disconnected.append((user_id, websocket))
+            # Send message
+            success = await self._send_to_connection(connection_id, personalized_message)
+            if not success:
+                disconnected.append(connection_id)
         
-        for conn in disconnected:
-            self.dm_connections[conversation_id].discard(conn)
+        # Clean up disconnected connections
+        for connection_id in disconnected:
+            metadata = self._get_connection_metadata(connection_id)
+            if metadata:
+                self._remove_connection_metadata(connection_id, metadata)
     
     async def send_to_user(self, user_id: str, message: dict):
-        if user_id not in self.user_connections:
+        """Send message to all connections of a user"""
+        key = self._get_redis_key("user", user_id)
+        connection_ids = self._get_connections_from_redis(key)
+        
+        if not connection_ids:
             return
         
-        data = json.dumps(message)
         disconnected = []
+        data = json.dumps(message)
         
-        for websocket in self.user_connections[user_id]:
-            try:
-                await websocket.send_text(data)
-            except Exception:
-                disconnected.append(websocket)
+        for connection_id in connection_ids:
+            success = await self._send_to_connection(connection_id, message)
+            if not success:
+                disconnected.append(connection_id)
         
-        for ws in disconnected:
-            self.user_connections[user_id].remove(ws)
+        # Clean up disconnected connections
+        for connection_id in disconnected:
+            metadata = self._get_connection_metadata(connection_id)
+            if metadata:
+                self._remove_connection_metadata(connection_id, metadata)
     
-    def _track_user_connection(self, user_id: str, websocket: WebSocket):
-        if user_id not in self.user_connections:
-            self.user_connections[user_id] = []
-        self.user_connections[user_id].append(websocket)
-    
-    def _untrack_user_connection(self, user_id: str, websocket: WebSocket):
-        if user_id in self.user_connections:
-            if websocket in self.user_connections[user_id]:
-                self.user_connections[user_id].remove(websocket)
-            if not self.user_connections[user_id]:
-                del self.user_connections[user_id]
+    async def connect_inbox(self, websocket: WebSocket, org_id: str, user_id: str):
+        """Connect a user to inbox notifications"""
+        await websocket.accept()
+        
+        connection_id = self._generate_connection_id()
+        
+        # Store websocket locally
+        self.local_connections[connection_id] = websocket
+        
+        # Store metadata in Redis
+        metadata = {
+            "org_id": org_id,
+            "user_id": user_id,
+            "connection_type": "inbox"
+        }
+        self.connection_metadata[connection_id] = metadata
+        self._store_connection_metadata(connection_id, user_id, "inbox", org_id=org_id)
+        
+        connection_key = f"inbox:{org_id}:{user_id}"
+        logger.info(f"User {user_id} connected to inbox for org {org_id} (connection: {connection_id})")
     
     async def broadcast_inbox_notification(self, org_id: str, user_id: str, message: dict):
         """Broadcast inbox notification to user's connections for specific org"""
-        connection_key = f"inbox:{org_id}:{user_id}"
+        connection_key = f"{org_id}:{user_id}"
+        key = self._get_redis_key("inbox", connection_key)
+        connection_ids = self._get_connections_from_redis(key)
         
-        if connection_key not in self.inbox_connections:
-            logger.info(f"No active inbox connections for {connection_key}. Active connections: {list(self.inbox_connections.keys())}")
+        if not connection_ids:
+            logger.info(f"No active inbox connections for {connection_key}")
             return
         
-        data = json.dumps(message)
         disconnected = []
-        connection_count = len(self.inbox_connections[connection_key])
+        connection_count = len(connection_ids)
         
         logger.info(f"Broadcasting inbox notification to {connection_count} connection(s) for {connection_key}")
         
-        for websocket in self.inbox_connections[connection_key]:
-            try:
-                await websocket.send_text(data)
-                logger.info(f"Successfully sent inbox notification to user {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to send inbox notification to user {user_id}: {e}")
-                disconnected.append(websocket)
+        for connection_id in connection_ids:
+            success = await self._send_to_connection(connection_id, message)
+            if not success:
+                disconnected.append(connection_id)
         
-        for ws in disconnected:
-            self.inbox_connections[connection_key].remove(ws)
-            if not self.inbox_connections[connection_key]:
-                del self.inbox_connections[connection_key]
+        # Clean up disconnected connections
+        for connection_id in disconnected:
+            metadata = self._get_connection_metadata(connection_id)
+            if metadata:
+                self._remove_connection_metadata(connection_id, metadata)
+        
+        if disconnected:
+            logger.info(f"Cleaned up {len(disconnected)} disconnected inbox connections")
+    
+    def cleanup_stale_connections(self):
+        """Clean up stale connections from local storage"""
+        if not redis_client:
+            return
+        
+        try:
+            stale_connections = []
+            
+            for connection_id, websocket in list(self.local_connections.items()):
+                # Check if connection metadata still exists in Redis
+                key = self._get_redis_key("connection", connection_id)
+                if not redis_client.exists(key):
+                    stale_connections.append(connection_id)
+            
+            # Remove stale connections
+            for connection_id in stale_connections:
+                metadata = self.connection_metadata.get(connection_id, {})
+                if connection_id in self.local_connections:
+                    del self.local_connections[connection_id]
+                if connection_id in self.connection_metadata:
+                    del self.connection_metadata[connection_id]
+                self._remove_connection_metadata(connection_id, metadata)
+            
+            if stale_connections:
+                logger.info(f"Cleaned up {len(stale_connections)} stale connections")
+        except Exception as e:
+            logger.error(f"Error cleaning up stale connections: {e}")
+    
+    def get_connection_stats(self) -> dict:
+        """Get statistics about active connections"""
+        stats = {
+            "local_connections": len(self.local_connections),
+            "instance_id": INSTANCE_ID
+        }
+        
+        if redis_client:
+            try:
+                # Count connections by type from Redis
+                project_keys = list(redis_client.scan_iter(match="ws:project:*"))
+                dm_keys = list(redis_client.scan_iter(match="ws:dm:*"))
+                user_keys = list(redis_client.scan_iter(match="ws:user:*"))
+                inbox_keys = list(redis_client.scan_iter(match="ws:inbox:*"))
+                
+                stats["redis_project_rooms"] = len(project_keys)
+                stats["redis_dm_rooms"] = len(dm_keys)
+                stats["redis_user_connections"] = len(user_keys)
+                stats["redis_inbox_rooms"] = len(inbox_keys)
+            except Exception as e:
+                logger.error(f"Error getting connection stats: {e}")
+        
+        return stats
 
 
 manager = ConnectionManager()
-
