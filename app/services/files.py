@@ -574,7 +574,7 @@ class FilesService:
         
         # Fetch from database if not cached
         try:
-            response = supabase.table("profiles").select("user_id, display_name, avatar_file_id").eq("user_id", str(user_id)).execute()
+            response = supabase.table("profiles").select("user_id, display_name, email, avatar_file_id").eq("user_id", str(user_id)).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -595,10 +595,11 @@ class FilesService:
             except HTTPException:
                 pass
         
-        # Cache the user data
+        # Cache the user data (include email for consistency)
         user_data_for_cache = {
             'id': profile['user_id'],
             'display_name': profile['display_name'],
+            'email': profile.get('email'),
             'avatar_file_id': profile.get('avatar_file_id'),
         }
         UserCache.set_user(str(user_id), user_data_for_cache)

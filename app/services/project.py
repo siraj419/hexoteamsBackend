@@ -841,7 +841,7 @@ class ProjectService:
                 }
             
             # Cache miss - fetch from database
-            user_response = supabase.table('profiles').select('user_id, display_name, avatar_file_id').eq(
+            user_response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').eq(
                 'user_id', user_id_str
             ).execute()
             
@@ -855,10 +855,11 @@ class ProjectService:
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
-                # Standardize on 'id' key for consistency across services
+                # Standardize on 'id' key for consistency across services (include email)
                 user_data_for_cache = {
                     'id': user['user_id'],
                     'display_name': user.get('display_name'),
+                    'email': user.get('email'),
                     'avatar_file_id': user.get('avatar_file_id')
                 }
                 
@@ -929,7 +930,7 @@ class ProjectService:
         if user_ids_to_fetch:
             try:
                 user_response = supabase.table('profiles').select(
-                    'user_id, display_name, avatar_file_id'
+                    'user_id, display_name, email, avatar_file_id'
                 ).in_('user_id', user_ids_to_fetch).execute()
                 
                 if user_response.data:
@@ -943,10 +944,11 @@ class ProjectService:
                             except Exception as e:
                                 logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                         
-                        # Standardize on 'id' key for consistency across services
+                        # Standardize on 'id' key for consistency across services (include email)
                         user_data_for_cache = {
                             'id': user['user_id'],
                             'display_name': user.get('display_name'),
+                            'email': user.get('email'),
                             'avatar_file_id': user.get('avatar_file_id')
                         }
                         

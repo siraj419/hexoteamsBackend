@@ -365,7 +365,7 @@ class TeamService:
                 # Pydantic will automatically convert it to TeamUserRole enum
                 members_list = []
                 for member_dict in cached.get('members', []):
-                    # Ensure email exists (required by schema)
+                    # Email should always be in cached data now, but handle edge case
                     if not member_dict.get('email'):
                         logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
                         continue
@@ -434,12 +434,18 @@ class TeamService:
             if not user_info:
                 continue
             
+            # Email should always be in cache now, but handle edge case
+            email = user_info.get('email')
+            if not email:
+                logger.warning(f"User {user_id_str} has no email in cache, skipping from team members")
+                continue
+            
             # Apply search filter if provided (filter on display_name and email from profiles)
             if search:
                 search_lower = search.lower()
                 display_name = user_info.get('display_name', '').lower()
-                email = user_info.get('email', '').lower()
-                if search_lower not in display_name and search_lower not in email:
+                email_lower = email.lower()
+                if search_lower not in display_name and search_lower not in email_lower:
                     continue
             
             # Ensure role is converted to string first, then to Enum
@@ -449,13 +455,6 @@ class TeamService:
             else:
                 # Convert string to Enum
                 role_enum = TeamUserRole(str(role_value))
-            
-            # Ensure email is available (required by schema)
-            email = user_info.get('email')
-            if not email:
-                # Skip users without email or try to fetch it
-                logger.warning(f"User {user_info['id']} has no email, skipping from team members")
-                continue
             
             members.append(TeamMembersResponse(
                 id=user_info['id'],
@@ -859,10 +858,11 @@ class TeamService:
             'avatar_url': avatar_url,
         }
         
-        # Cache the user data
+        # Cache the user data (include email for consistency)
         user_data_for_cache = {
             'id': profile['user_id'],
             'display_name': profile['display_name'],
+            'email': profile.get('email'),
             'avatar_file_id': profile.get('avatar_file_id'),
         }
         UserCache.set_user(str(user_id), user_data_for_cache)
@@ -934,7 +934,7 @@ class TeamService:
                     'avatar_url': avatar_url,
                 }
                 
-                # Cache the user data
+                # Cache the user data (include email for consistency)
                 user_data_for_cache = {
                     'id': profile['user_id'],
                     'display_name': profile['display_name'],
