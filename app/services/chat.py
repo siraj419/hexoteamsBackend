@@ -781,7 +781,25 @@ class ChatService:
                         for item in unread_response.data
                     }
             
-            # Enrich conversations with batch-fetched user info and unread counts
+            # Batch fetch last messages for all conversations
+            last_messages = {}
+            if conversation_ids:
+                conversation_ids_str = [str(cid) for cid in conversation_ids]
+                # Get last message for each conversation
+                for conv_id_str in conversation_ids_str:
+                    try:
+                        last_msg_response = supabase.table('chat_messages').select(
+                            'id, body, created_at'
+                        ).eq('conversation_id', conv_id_str).is_('deleted_at', 'null').order(
+                            'created_at', desc=True
+                        ).limit(1).execute()
+                        
+                        if last_msg_response.data and len(last_msg_response.data) > 0:
+                            last_messages[conv_id_str] = last_msg_response.data[0]
+                    except Exception:
+                        pass  # Continue if fetching last message fails
+            
+            # Enrich conversations with batch-fetched user info, unread counts, and last message preview
             for conversation in conversations:
                 other_user_id = conversation.get('user2_id') if conversation.get('user1_id') == str(user_id) else conversation.get('user1_id')
                 
@@ -798,6 +816,17 @@ class ChatService:
                 # Set unread count from batch-fetched data
                 conversation_id_str = str(conversation['id'])
                 conversation['unread_count'] = unread_counts.get(conversation_id_str, 0)
+                
+                # Set last message preview
+                last_message = last_messages.get(conversation_id_str)
+                if last_message:
+                    body = last_message.get('body', '')
+                    if body:
+                        conversation['last_message_preview'] = body[:100] + ('...' if len(body) > 100 else '')
+                    else:
+                        conversation['last_message_preview'] = '[File attachment]'
+                else:
+                    conversation['last_message_preview'] = None
             
             return {
                 'conversations': [ConversationResponse(**conv) for conv in conversations],
