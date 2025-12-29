@@ -297,6 +297,7 @@ def create_dm_conversation(
 def get_dm_messages(
     conversation_id: UUID4,
     conversation_participant: any = Depends(get_dm_conversation_participant),
+    organization: any = Depends(get_active_organization),
     limit: Optional[int] = Query(None, ge=1),
     offset: Optional[int] = Query(None, ge=0),
     before_date: Optional[datetime] = Query(None),
@@ -306,12 +307,14 @@ def get_dm_messages(
     Get paginated message history for DM conversation
     
     Requires: Conversation participant
+    Returns only messages from the active organization
     """
     
     chat_service = ChatService()
     result = chat_service.get_direct_messages(
         conversation_id,
         UUID4(conversation_participant['user_id']),
+        UUID4(organization['id']),
         limit=limit,
         offset=offset,
         before_date=before_date,
@@ -326,18 +329,21 @@ async def send_direct_message(
     conversation_id: UUID4,
     message_data: DirectMessageCreate,
     conversation_participant: any = Depends(get_dm_conversation_participant),
+    organization: any = Depends(get_active_organization),
 ):
     """
     Send a direct message
     
     Requires: Conversation participant
+    Message must belong to the active organization
     """
     
     chat_service = ChatService()
     response = chat_service.send_direct_message(
         conversation_id,
         UUID4(conversation_participant['user_id']),
-        message_data
+        message_data,
+        UUID4(organization['id'])
     )
     
     await manager.broadcast_to_dm(
@@ -475,11 +481,13 @@ async def mark_dm_messages_read(
     conversation_id: UUID4,
     read_data: MessageReadRequest,
     user: any = Depends(get_current_user),
+    organization: any = Depends(get_active_organization),
 ):
     """
     Mark direct messages as read
     
     Requires: Conversation participant
+    Only marks messages from the active organization
     """
     conversation_participant = get_dm_conversation_participant(conversation_id, user)
     
@@ -487,7 +495,8 @@ async def mark_dm_messages_read(
     marked_message_ids = chat_service.mark_dm_read(
         conversation_id,
         UUID4(user.id),
-        read_data.last_read_message_id
+        read_data.last_read_message_id,
+        UUID4(organization['id'])
     )
     
     # Broadcast all messages that were marked as read

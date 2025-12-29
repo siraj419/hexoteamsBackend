@@ -985,7 +985,8 @@ class ChatService:
         self,
         conversation_id: UUID4,
         sender_id: UUID4,
-        message_data: DirectMessageCreate
+        message_data: DirectMessageCreate,
+        organization_id: UUID4
     ) -> DirectMessageResponse:
         """
         Send a direct message
@@ -994,12 +995,13 @@ class ChatService:
             conversation_id: The conversation ID
             sender_id: The user sending the message
             message_data: The message data
+            organization_id: The organization ID (must match conversation's organization)
             
         Returns:
             DirectMessageResponse: The created message
         """
         try:
-            conversation = self._get_conversation(conversation_id, sender_id)
+            conversation = self._get_conversation(conversation_id, sender_id, organization_id)
             
             receiver_id = conversation['user2_id'] if conversation['user1_id'] == str(sender_id) else conversation['user1_id']
             
@@ -1069,6 +1071,7 @@ class ChatService:
         self,
         conversation_id: UUID4,
         user_id: UUID4,
+        organization_id: UUID4,
         limit: Optional[int] = 50,
         offset: Optional[int] = 0,
         before_date: Optional[datetime] = None,
@@ -1080,6 +1083,7 @@ class ChatService:
         Args:
             conversation_id: The conversation ID
             user_id: The requesting user ID
+            organization_id: The organization ID (must match conversation's organization)
             limit: Number of messages to return
             offset: Number of messages to skip
             before_date: Get messages before this date
@@ -1089,12 +1093,12 @@ class ChatService:
             Dict containing messages and pagination info
         """
         try:
-            conversation = self._get_conversation(conversation_id, user_id)
+            conversation = self._get_conversation(conversation_id, user_id, organization_id)
             
             query = supabase.table('direct_messages').select(
                 'id, body, sender_id, receiver_id, created_at, edited_at, deleted_at, message_type, attachments, read_at, organization_id',
                 count='exact'
-            ).or_(
+            ).eq('organization_id', str(organization_id)).or_(
                 f"sender_id.eq.{conversation['user1_id']},sender_id.eq.{conversation['user2_id']}"
             ).or_(
                 f"receiver_id.eq.{conversation['user1_id']},receiver_id.eq.{conversation['user2_id']}"
@@ -1181,7 +1185,8 @@ class ChatService:
         self,
         conversation_id: UUID4,
         user_id: UUID4,
-        last_read_message_id: UUID4
+        last_read_message_id: UUID4,
+        organization_id: UUID4
     ) -> List[str]:
         """
         Mark direct messages as read
@@ -1190,12 +1195,13 @@ class ChatService:
             conversation_id: The conversation ID
             user_id: The user marking messages as read
             last_read_message_id: ID of the last message read
+            organization_id: The organization ID (must match conversation's organization)
             
         Returns:
             List of message IDs that were marked as read
         """
         try:
-            conversation = self._get_conversation(conversation_id, user_id)
+            conversation = self._get_conversation(conversation_id, user_id, organization_id)
             
             last_message = supabase.table('direct_messages').select(
                 'created_at'
@@ -1211,22 +1217,22 @@ class ChatService:
             other_user_id = conversation['user2_id'] if conversation['user1_id'] == str(user_id) else conversation['user1_id']
             
             # Get message IDs that will be updated (for broadcasting) - do this before update
-            # Filter by conversation participants to ensure we only update messages in this conversation
+            # Filter by conversation participants and organization to ensure we only update messages in this conversation
             unread_messages = supabase.table('direct_messages').select('id').eq(
-                'receiver_id', str(user_id)
-            ).eq('sender_id', other_user_id).lte(
+                'organization_id', str(organization_id)
+            ).eq('receiver_id', str(user_id)).eq('sender_id', other_user_id).lte(
                 'created_at', last_message.data[0]['created_at']
             ).is_('read_at', 'null').execute()
             
             message_ids = [msg['id'] for msg in (unread_messages.data or [])]
             
             # Batch update all messages in a single query
-            # Filter by conversation participants to ensure we only update messages in this conversation
+            # Filter by conversation participants and organization to ensure we only update messages in this conversation
             if message_ids:
                 read_at = datetime.now(timezone.utc).isoformat()
                 supabase.table('direct_messages').update({
                     'read_at': read_at
-                }).eq('receiver_id', str(user_id)).eq(
+                }).eq('organization_id', str(organization_id)).eq('receiver_id', str(user_id)).eq(
                     'sender_id', other_user_id
                 ).lte(
                     'created_at', last_message.data[0]['created_at']
@@ -1520,11 +1526,17 @@ class ChatService:
             logger.warning(f"Could not get unread count: {str(e)}")
             conversation['unread_count'] = 0
     
-    def _get_conversation(self, conversation_id: UUID4, user_id: UUID4) -> Dict[str, Any]:
+    def _get_conversation(self, conversation_id: UUID4, user_id: UUID4, organization_id: Optional[UUID4] = None) -> Dict[str, Any]:
         """Get and verify conversation access"""
-        conversation_response = supabase.table('chat_conversations').select(
+        query = supabase.table('chat_conversations').select(
             'id, user1_id, user2_id, organization_id, last_message_at, created_at'
-        ).eq('id', str(conversation_id)).execute()
+        ).eq('id', str(conversation_id))
+        
+        # Filter by organization_id if provided
+        if organization_id:
+            query = query.eq('organization_id', str(organization_id))
+        
+        conversation_response = query.execute()
         
         if not conversation_response.data:
             raise HTTPException(
@@ -1534,10 +1546,18 @@ class ChatService:
         
         conversation = conversation_response.data[0]
         
+        # Verify user is a participant
         if conversation['user1_id'] != str(user_id) and conversation['user2_id'] != str(user_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have access to this conversation"
+            )
+        
+        # Verify organization_id matches if provided
+        if organization_id and str(conversation['organization_id']) != str(organization_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Conversation does not belong to this organization"
             )
         
         return conversation
