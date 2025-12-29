@@ -81,10 +81,10 @@ def get_active_time_log(
     "",
     response_model=TimeLogListResponse,
     summary="Get time logs",
-    description="Get a list of time logs with optional filters. Returns paginated results with total count and duration.",
+    description="Get a list of time logs for projects in the current organization with optional filters. Returns paginated results with total count and duration.",
 )
 def get_time_logs(
-    project_id: Optional[UUID4] = Query(None, description="Filter by project ID"),
+    project_id: Optional[UUID4] = Query(None, description="Filter by project ID (must belong to current organization)"),
     task_id: Optional[UUID4] = Query(None, description="Filter by task ID"),
     from_date: Optional[date] = Query(None, description="Filter by start date (inclusive)"),
     to_date: Optional[date] = Query(None, description="Filter by end date (inclusive)"),
@@ -94,6 +94,7 @@ def get_time_logs(
     organization: dict = Depends(get_active_organization),
 ):
     return time_log_service.get_time_logs(
+        organization_id=UUID4(organization['id']),
         user_id=UUID4(organization['member_user_id']),
         project_id=project_id,
         task_id=task_id,
@@ -109,38 +110,38 @@ def get_time_logs(
     "/{time_log_id}",
     response_model=TimeLogGetResponse,
     summary="Get a specific time log",
-    description="Get details of a specific time log by ID.",
+    description="Get details of a specific time log by ID. Time log must belong to a project in the current organization.",
 )
 def get_time_log(
     time_log_id: UUID4,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.get_time_log(time_log_id, UUID4(organization['member_user_id']))
+    return time_log_service.get_time_log(time_log_id, UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.put(
     "/{time_log_id}",
     response_model=TimeLogUpdateResponse,
     summary="Update a time log",
-    description="Update a stopped time log. Running time logs cannot be updated.",
+    description="Update a stopped time log. Running time logs cannot be updated. Time log must belong to a project in the current organization.",
 )
 def update_time_log(
     time_log_id: UUID4,
     time_log_request: TimeLogUpdateRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.update_time_log(time_log_id, time_log_request, UUID4(organization['member_user_id']))
+    return time_log_service.update_time_log(time_log_id, time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
 
 
 @router.delete(
     "/{time_log_id}",
     summary="Delete a time log",
-    description="Delete a time log by ID.",
+    description="Delete a time log by ID. Time log must belong to a project in the current organization.",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_time_log(
     time_log_id: UUID4,
     organization: dict = Depends(get_active_organization),
 ):
-    time_log_service.delete_time_log(time_log_id, UUID4(organization['member_user_id']))
+    time_log_service.delete_time_log(time_log_id, UUID4(organization['member_user_id']), UUID4(organization['id']))
 

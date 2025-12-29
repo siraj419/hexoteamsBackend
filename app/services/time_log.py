@@ -40,12 +40,50 @@ class TimeLogService:
     def __init__(self):
         pass
     
-    def _invalidate_time_log_caches(self, user_id: UUID4, time_log_id: Optional[UUID4] = None):
+    def _invalidate_time_log_caches(self, user_id: UUID4, time_log_id: Optional[UUID4] = None, organization_id: Optional[UUID4] = None):
         """Invalidate time log caches"""
         cache_service.delete(f"time_log:active:{user_id}")
-        cache_service.invalidate_pattern(f"time_logs:list:{user_id}:*")
+        if organization_id:
+            cache_service.invalidate_pattern(f"time_logs:list:{organization_id}:*")
+        else:
+            cache_service.invalidate_pattern(f"time_logs:list:*")
         if time_log_id:
             cache_service.delete(f"time_log:{time_log_id}")
+    
+    def _verify_time_log_organization(self, time_log_id: UUID4, organization_id: UUID4) -> None:
+        """Verify that a time log's project belongs to the organization"""
+        try:
+            # Get the time log's project_id
+            time_log_response = supabase.table('time_logs').select('project_id').eq('id', str(time_log_id)).execute()
+            if not time_log_response.data or len(time_log_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Time log not found"
+                )
+            
+            project_id = time_log_response.data[0]['project_id']
+            
+            # Verify the project belongs to the organization
+            project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
+            if not project_response.data or len(project_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found"
+                )
+            
+            project_org_id = project_response.data[0]['org_id']
+            if str(project_org_id) != str(organization_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Time log does not belong to this organization"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to verify time log organization: {str(e)}"
+            )
     
     def start_time_log(
         self,
@@ -61,12 +99,13 @@ class TimeLogService:
                     detail="You already have an active time log running. Please stop it before starting a new one."
                 )
             
-            project_check = supabase.table('projects').select('id').eq('id', str(time_log_request.project_id)).execute()
+            project_check = supabase.table('projects').select('id, org_id').eq('id', str(time_log_request.project_id)).execute()
             if not project_check.data or len(project_check.data) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Project not found"
                 )
+            organization_id = UUID4(project_check.data[0]['org_id'])
             
             task_check = supabase.table('tasks').select('id, project_id').eq('id', str(time_log_request.task_id)).execute()
             if not task_check.data or len(task_check.data) == 0:
@@ -130,7 +169,7 @@ class TimeLogService:
         )
         
         # Invalidate caches
-        self._invalidate_time_log_caches(user_id)
+        self._invalidate_time_log_caches(user_id, organization_id=organization_id)
         
         return result
     
@@ -140,12 +179,13 @@ class TimeLogService:
         user_id: UUID4,
     ) -> TimeLogCreateResponse:
         try:
-            project_check = supabase.table('projects').select('id').eq('id', str(time_log_request.project_id)).execute()
+            project_check = supabase.table('projects').select('id, org_id').eq('id', str(time_log_request.project_id)).execute()
             if not project_check.data or len(project_check.data) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Project not found"
                 )
+            organization_id = UUID4(project_check.data[0]['org_id'])
             
             task_check = supabase.table('tasks').select('id, project_id').eq('id', str(time_log_request.task_id)).execute()
             if not task_check.data or len(task_check.data) == 0:
@@ -230,7 +270,7 @@ class TimeLogService:
         )
         
         # Invalidate caches
-        self._invalidate_time_log_caches(user_id)
+        self._invalidate_time_log_caches(user_id, organization_id=organization_id)
         
         return result
     
@@ -262,6 +302,13 @@ class TimeLogService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Time log is not running"
                 )
+            
+            # Get organization_id from project
+            project_response = supabase.table('projects').select('org_id').eq('id', str(log['project_id'])).execute()
+            if project_response.data and len(project_response.data) > 0:
+                organization_id = UUID4(project_response.data[0]['org_id'])
+            else:
+                organization_id = None
             
             now = datetime.now(timezone.utc)
             current_time = now.time()
@@ -325,7 +372,7 @@ class TimeLogService:
         )
         
         # Invalidate caches
-        self._invalidate_time_log_caches(user_id, time_log_id)
+        self._invalidate_time_log_caches(user_id, time_log_id, organization_id=organization_id)
         
         return result
     
@@ -394,6 +441,7 @@ class TimeLogService:
     
     def get_time_logs(
         self,
+        organization_id: UUID4,
         user_id: Optional[UUID4] = None,
         project_id: Optional[UUID4] = None,
         task_id: Optional[UUID4] = None,
@@ -404,19 +452,48 @@ class TimeLogService:
         offset: Optional[int] = 0,
     ) -> TimeLogListResponse:
         # Build cache key
-        cache_key = f"time_logs:list:{user_id}:{project_id}:{task_id}:{from_date}:{to_date}:{status_filter}:{limit}:{offset}"
+        cache_key = f"time_logs:list:{organization_id}:{user_id}:{project_id}:{task_id}:{from_date}:{to_date}:{status_filter}:{limit}:{offset}"
         
         # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return TimeLogListResponse(**cached)
         
+        # Get all project IDs for the organization
+        try:
+            projects_response = supabase.table('projects').select('id').eq('org_id', str(organization_id)).execute()
+            if not projects_response.data:
+                # No projects in organization, return empty result
+                return TimeLogListResponse(
+                    time_logs=[],
+                    total_count=0,
+                    total_duration_seconds=0,
+                    total_duration_formatted=format_duration(0),
+                )
+            project_ids = [str(p['id']) for p in projects_response.data]
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get organization projects: {str(e)}"
+            )
+        
+        # If a specific project_id is provided, verify it belongs to the organization
+        if project_id:
+            if str(project_id) not in project_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Project does not belong to this organization"
+                )
+            # Filter to only this project
+            project_ids = [str(project_id)]
+        
         query = supabase.table('time_logs').select('*', count='exact')
+        
+        # Filter by organization projects
+        query = query.in_('project_id', project_ids)
         
         if user_id:
             query = query.eq('created_by', str(user_id))
-        if project_id:
-            query = query.eq('project_id', str(project_id))
         if task_id:
             query = query.eq('task_id', str(task_id))
         if from_date:
@@ -472,13 +549,16 @@ class TimeLogService:
         
         return result
     
-    def get_time_log(self, time_log_id: UUID4, user_id: UUID4) -> TimeLogGetResponse:
+    def get_time_log(self, time_log_id: UUID4, user_id: UUID4, organization_id: UUID4) -> TimeLogGetResponse:
         cache_key = f"time_log:{time_log_id}"
         
         # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return TimeLogGetResponse(**cached)
+        
+        # Verify time log belongs to organization
+        self._verify_time_log_organization(time_log_id, organization_id)
         
         try:
             response = supabase.table('time_logs').select('*').eq('id', str(time_log_id)).execute()
@@ -529,7 +609,11 @@ class TimeLogService:
         time_log_id: UUID4,
         time_log_request: TimeLogUpdateRequest,
         user_id: UUID4,
+        organization_id: UUID4,
     ) -> TimeLogUpdateResponse:
+        # Verify time log belongs to organization
+        self._verify_time_log_organization(time_log_id, organization_id)
+        
         try:
             existing_log = supabase.table('time_logs').select('*').eq('id', str(time_log_id)).execute()
             
@@ -602,11 +686,14 @@ class TimeLogService:
         )
         
         # Invalidate caches
-        self._invalidate_time_log_caches(user_id, time_log_id)
+        self._invalidate_time_log_caches(user_id, time_log_id, organization_id=organization_id)
         
         return result
     
-    def delete_time_log(self, time_log_id: UUID4, user_id: UUID4) -> TimeLogDeleteResponse:
+    def delete_time_log(self, time_log_id: UUID4, user_id: UUID4, organization_id: UUID4) -> TimeLogDeleteResponse:
+        # Verify time log belongs to organization
+        self._verify_time_log_organization(time_log_id, organization_id)
+        
         try:
             existing_log = supabase.table('time_logs').select('*').eq('id', str(time_log_id)).execute()
             
@@ -641,7 +728,7 @@ class TimeLogService:
             )
         
         # Invalidate caches
-        self._invalidate_time_log_caches(user_id, time_log_id)
+        self._invalidate_time_log_caches(user_id, time_log_id, organization_id=organization_id)
         
         return TimeLogDeleteResponse(
             success=True,
