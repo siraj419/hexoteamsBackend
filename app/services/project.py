@@ -855,8 +855,9 @@ class ProjectService:
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
+                # Standardize on 'id' key for consistency across services
                 user_data_for_cache = {
-                    'user_id': user['user_id'],
+                    'id': user['user_id'],
                     'display_name': user.get('display_name'),
                     'avatar_file_id': user.get('avatar_file_id')
                 }
@@ -942,8 +943,9 @@ class ProjectService:
                             except Exception as e:
                                 logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                         
+                        # Standardize on 'id' key for consistency across services
                         user_data_for_cache = {
-                            'user_id': user['user_id'],
+                            'id': user['user_id'],
                             'display_name': user.get('display_name'),
                             'avatar_file_id': user.get('avatar_file_id')
                         }
@@ -1035,7 +1037,15 @@ class ProjectService:
     ) -> bool:
         
         try:
-            is_archived = supabase.table('projects').select('archived').eq('id', project_id).execute().data[0]['archived']
+            response = supabase.table('projects').select('archived').eq('id', project_id).execute()
+            if not response.data or len(response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found"
+                )
+            is_archived = response.data[0].get('archived', False)
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

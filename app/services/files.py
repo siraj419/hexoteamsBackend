@@ -62,6 +62,12 @@ class FilesService:
                 detail=f"Failed to create file record in database: {e}"
             )
         
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create file: no data returned"
+            )
+        
         # Extract file extension from original filename
         file_extension = os.path.splitext(file.filename)[1]  # Gets extension with dot (e.g., '.jpg')
         file_id = str(response.data[0]["id"])
@@ -94,7 +100,13 @@ class FilesService:
         
         # get user profile
         try:
-            user_profile = supabase.table("profiles").select("display_name").eq("user_id", response.data[0]['uploaded_by']).execute()
+            uploaded_by = response.data[0].get('uploaded_by')
+            if not uploaded_by:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="File record missing uploaded_by field"
+                )
+            user_profile = supabase.table("profiles").select("display_name").eq("user_id", uploaded_by).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -139,6 +151,12 @@ class FilesService:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update file record from database: {e}"
+            )
+        
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found or update failed"
             )
         
         # Extract file extension from original filename
@@ -538,9 +556,12 @@ class FilesService:
                 except HTTPException:
                     pass
             
+            # Handle both 'id' and 'user_id' keys for cache compatibility
+            user_id_value = cached_user.get('id') or cached_user.get('user_id') or str(user_id)
+            
             return FileUploadedByUserGetResponse(
-                id=UUID4(cached_user['id']),
-                display_name=cached_user['display_name'],
+                id=UUID4(user_id_value),
+                display_name=cached_user.get('display_name', ''),
                 avatar_url=avatar_url,
             )
         

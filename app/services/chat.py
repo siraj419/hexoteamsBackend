@@ -86,8 +86,9 @@ class ChatService:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
                 # Prepare user data for caching (include avatar_file_id for future URL generation)
+                # Standardize on 'id' key for consistency across services
                 user_data_for_cache = {
-                    'user_id': user['user_id'],
+                    'id': user['user_id'],
                     'display_name': user.get('display_name'),
                     'avatar_file_id': user.get('avatar_file_id')
                 }
@@ -177,8 +178,9 @@ class ChatService:
                             except Exception as e:
                                 logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                         
+                        # Standardize on 'id' key for consistency across services
                         user_data_for_cache = {
-                            'user_id': user['user_id'],
+                            'id': user['user_id'],
                             'display_name': user.get('display_name'),
                             'avatar_file_id': user.get('avatar_file_id')
                         }
@@ -546,10 +548,12 @@ class ChatService:
         try:
             # Get the created_at of the last read message
             last_message = supabase.table('chat_messages').select('created_at').eq('id', str(last_read_message_id)).execute()
-            if not last_message.data:
+            if not last_message.data or len(last_message.data) == 0:
                 return []
             
-            last_message_created_at = last_message.data[0]['created_at']
+            last_message_created_at = last_message.data[0].get('created_at')
+            if not last_message_created_at:
+                return []
             user_id_str = str(user_id)
             
             # Get all message IDs that need to be updated (for return value)
@@ -562,7 +566,7 @@ class ChatService:
             if not message_response.data:
                 return []
             
-            message_ids = [msg['id'] for msg in message_response.data]
+            message_ids = [msg.get('id') for msg in message_response.data if msg.get('id')]
             
             if not message_ids:
                 return []
@@ -909,7 +913,7 @@ class ChatService:
                     'offset': offset
                 }
             
-            project_ids = [p['id'] for p in projects_response.data]
+            project_ids = [p.get('id') for p in projects_response.data if p.get('id')]
             
             # Batch fetch all unread counts for projects
             unread_counts = {}
@@ -1087,7 +1091,6 @@ class ChatService:
                     conversation_id=conversation_id,
                 )
             except Exception as e:
-                raise e
                 logger.error(f"Failed to send DM inbox notification: {e}")
             
             return DirectMessageResponse(**message)
@@ -1095,7 +1098,6 @@ class ChatService:
         except HTTPException:
             raise
         except Exception as e:
-            raise e
             logger.error(f"Error sending direct message: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1242,10 +1244,17 @@ class ChatService:
                 'created_at'
             ).eq('id', str(last_read_message_id)).execute()
             
-            if not last_message.data:
+            if not last_message.data or len(last_message.data) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Message not found"
+                )
+            
+            last_message_created_at = last_message.data[0].get('created_at')
+            if not last_message_created_at:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Message missing created_at field"
                 )
             
             # Get the other participant in the conversation
@@ -1256,10 +1265,10 @@ class ChatService:
             unread_messages = supabase.table('direct_messages').select('id').eq(
                 'organization_id', str(organization_id)
             ).eq('receiver_id', str(user_id)).eq('sender_id', other_user_id).lte(
-                'created_at', last_message.data[0]['created_at']
+                'created_at', last_message_created_at
             ).is_('read_at', 'null').execute()
             
-            message_ids = [msg['id'] for msg in (unread_messages.data or [])]
+            message_ids = [msg.get('id') for msg in (unread_messages.data or []) if msg.get('id')]
             
             # Batch update all messages in a single query
             # Filter by conversation participants and organization to ensure we only update messages in this conversation
@@ -1270,7 +1279,7 @@ class ChatService:
                 }).eq('organization_id', str(organization_id)).eq('receiver_id', str(user_id)).eq(
                     'sender_id', other_user_id
                 ).lte(
-                    'created_at', last_message.data[0]['created_at']
+                    'created_at', last_message_created_at
                 ).is_('read_at', 'null').execute()
             
             return message_ids
@@ -1628,7 +1637,7 @@ class ChatService:
             if not projects_response.data:
                 return []
             
-            project_ids = [p['project_id'] for p in projects_response.data]
+            project_ids = [p.get('project_id') for p in projects_response.data if p.get('project_id')]
             
             results = []
             all_messages = []
@@ -1681,14 +1690,15 @@ class ChatService:
                 else:
                     msg['user'] = None
                 
+                # Use .get() for safety in case keys are missing
                 results.append({
-                    'message_id': msg['id'],
+                    'message_id': msg.get('id'),
                     'chat_type': 'project',
-                    'reference_id': msg['project_id'],
+                    'reference_id': msg.get('project_id'),
                     'body': msg.get('body'),
-                    'user_id': msg['user_id'],
+                    'user_id': msg.get('user_id'),
                     'user': msg.get('user'),
-                    'created_at': msg['created_at'],
+                    'created_at': msg.get('created_at'),
                     'relevance_score': 1.0
                 })
             
@@ -1765,14 +1775,15 @@ class ChatService:
                 else:
                     msg['receiver'] = None
                 
+                # Use .get() for safety in case keys are missing
                 results.append({
-                    'message_id': msg['id'],
+                    'message_id': msg.get('id'),
                     'chat_type': 'direct',
-                    'reference_id': msg['id'],
+                    'reference_id': msg.get('id'),
                     'body': msg.get('body'),
-                    'user_id': msg['sender_id'],
+                    'user_id': msg.get('sender_id'),
                     'user': msg.get('sender'),
-                    'created_at': msg['created_at'],
+                    'created_at': msg.get('created_at'),
                     'relevance_score': 1.0
                 })
             

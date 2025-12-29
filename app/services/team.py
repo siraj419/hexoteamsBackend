@@ -804,9 +804,12 @@ class TeamService:
                 except Exception:
                     pass
             
+            # Handle both 'id' and 'user_id' keys for cache compatibility
+            user_id_value = cached_user.get('id') or cached_user.get('user_id') or str(user_id)
+            
             return {
-                'id': cached_user['id'],
-                'display_name': cached_user['display_name'],
+                'id': user_id_value,
+                'display_name': cached_user.get('display_name', ''),
                 'email': cached_user.get('email'),
                 'avatar_url': avatar_url,
             }
@@ -864,8 +867,9 @@ class TeamService:
             user_id_str = str(user_id)
             cached_user = UserCache.get_user(user_id_str)
             if cached_user:
-                # Validate cached data has required keys
-                if isinstance(cached_user, dict) and 'id' in cached_user and 'display_name' in cached_user:
+                # Validate cached data has required keys (handle both 'id' and 'user_id')
+                has_id = isinstance(cached_user, dict) and ('id' in cached_user or 'user_id' in cached_user) and 'display_name' in cached_user
+                if has_id:
                     avatar_url = None
                     if cached_user.get('avatar_file_id'):
                         try:
@@ -873,9 +877,12 @@ class TeamService:
                         except Exception:
                             pass
                     
+                    # Handle both 'id' and 'user_id' keys for cache compatibility
+                    user_id_value = cached_user.get('id') or cached_user.get('user_id') or user_id_str
+                    
                     users_dict[user_id_str] = {
-                        'id': cached_user['id'],
-                        'display_name': cached_user['display_name'],
+                        'id': user_id_value,
+                        'display_name': cached_user.get('display_name', ''),
                         'email': cached_user.get('email'),
                         'avatar_url': avatar_url,
                     }
