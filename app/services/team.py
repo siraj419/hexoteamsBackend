@@ -357,7 +357,27 @@ class TeamService:
             cache_key = f"team:members:{org_id}:{role}:{limit}:{offset}"
             cached = cache_service.get(cache_key)
             if cached:
-                return cached
+                # Reconstruct Pydantic models from cached dict
+                # The cached data should have role as a string (from model_dump(mode='json'))
+                # Pydantic will automatically convert it to TeamUserRole enum
+                members_list = []
+                for member_dict in cached.get('members', []):
+                    # Ensure role is a string (not Enum class or instance)
+                    if 'role' in member_dict:
+                        role_value = member_dict['role']
+                        # If it's already a string, keep it; if it's an Enum, get its value
+                        if isinstance(role_value, TeamUserRole):
+                            member_dict['role'] = role_value.value
+                        elif not isinstance(role_value, str):
+                            # If it's something else (like Enum class), skip or use default
+                            member_dict['role'] = 'member'  # default fallback
+                    members_list.append(TeamMembersResponse(**member_dict))
+                return {
+                    'members': members_list,
+                    'total': cached.get('total', 0),
+                    'limit': cached.get('limit'),
+                    'offset': cached.get('offset')
+                }
         
         query = supabase.table('organization_members').select(
             'user_id, role, created_at',
@@ -414,12 +434,20 @@ class TeamService:
                 if search_lower not in display_name and search_lower not in email:
                     continue
             
+            # Ensure role is converted to string first, then to Enum
+            role_value = member['role']
+            if isinstance(role_value, TeamUserRole):
+                role_enum = role_value
+            else:
+                # Convert string to Enum
+                role_enum = TeamUserRole(str(role_value))
+            
             members.append(TeamMembersResponse(
                 id=user_info['id'],
                 display_name=user_info['display_name'],
                 email=user_info['email'],
                 avatar_url=user_info.get('avatar_url'),
-                role=TeamUserRole(member['role']),
+                role=role_enum,
             ))
         
         # Apply pagination after filtering if search was provided
@@ -432,9 +460,15 @@ class TeamService:
         
         result = {'members': members, 'total': total, 'limit': limit, 'offset': offset}
         
-        # Cache result if no search
+        # Cache result if no search (convert Pydantic models to dicts for proper serialization)
         if not search:
-            cache_service.set(f"team:members:{org_id}:{role}:{limit}:{offset}", result, ttl=self.CACHE_TTL_MEMBERS)
+            cache_data = {
+                'members': [member.model_dump(mode='json') for member in members],
+                'total': total,
+                'limit': limit,
+                'offset': offset
+            }
+            cache_service.set(f"team:members:{org_id}:{role}:{limit}:{offset}", cache_data, ttl=self.CACHE_TTL_MEMBERS)
         
         return result
     

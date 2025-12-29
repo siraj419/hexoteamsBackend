@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Dict, Any, List, Union, Callable
 from datetime import timedelta, datetime, date
 from uuid import UUID
+from enum import Enum
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,9 @@ class CacheService:
         """Custom JSON serializer for non-serializable types."""
         if isinstance(obj, UUID):
             return str(obj)
+        elif isinstance(obj, Enum):
+            # Handle Enum types - return the value, not the Enum instance
+            return obj.value
         elif isinstance(obj, (datetime, date)):
             return obj.isoformat()
         elif hasattr(obj, '__dict__'):
