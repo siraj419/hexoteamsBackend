@@ -366,11 +366,24 @@ class ConnectionManager:
         if connection_id in self.local_connections:
             try:
                 websocket = self.local_connections[connection_id]
+                
+                # Check websocket state before sending
+                if websocket.client_state.name != "CONNECTED":
+                    logger.warning(f"WebSocket {connection_id} is not in CONNECTED state: {websocket.client_state.name}")
+                    # Clean up disconnected connection
+                    metadata = self.connection_metadata.get(connection_id, {})
+                    del self.local_connections[connection_id]
+                    if connection_id in self.connection_metadata:
+                        del self.connection_metadata[connection_id]
+                    self._remove_connection_metadata(connection_id, metadata)
+                    return False
+                
                 data = json.dumps(message)
                 await websocket.send_text(data)
+                logger.debug(f"Successfully sent message to connection {connection_id}")
                 return True
             except Exception as e:
-                logger.error(f"Failed to send to local connection {connection_id}: {e}")
+                logger.error(f"Failed to send to local connection {connection_id}: {e}", exc_info=True)
                 # Clean up failed connection
                 if connection_id in self.local_connections:
                     metadata = self.connection_metadata.get(connection_id, {})
@@ -380,18 +393,24 @@ class ConnectionManager:
                     self._remove_connection_metadata(connection_id, metadata)
                 return False
         
-        # Connection is on another instance
-        # Note: For full cross-instance support, you'd need a pub/sub listener
-        # For now, we log that the connection is on another instance
+        # Connection is not in local storage - check if it exists in Redis
         metadata = self._get_connection_metadata(connection_id)
         if metadata:
             instance_id = metadata.get("instance_id")
             if instance_id != INSTANCE_ID:
-                logger.debug(f"Connection {connection_id} is on instance {instance_id}, not local")
+                logger.debug(f"Connection {connection_id} is on instance {instance_id}, not local (current: {INSTANCE_ID})")
                 # In a multi-instance setup, you'd publish to Redis pub/sub here
                 # and have each instance check if the connection is local
                 # For now, we return False as the connection is not local
                 return False
+            else:
+                # Connection metadata exists but websocket is not in local_connections
+                # This means the connection was lost but metadata wasn't cleaned up
+                logger.warning(f"Connection {connection_id} has metadata but websocket not found locally. Cleaning up stale metadata.")
+                self._remove_connection_metadata(connection_id, metadata)
+                return False
+        else:
+            logger.warning(f"Connection {connection_id} not found in local storage or Redis metadata")
         
         return False
     
