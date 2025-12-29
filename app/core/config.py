@@ -15,19 +15,6 @@ class Settings(BaseSettings):
     # Frontend URL (for email redirections)
     FRONTEND_URL: str = Field('http://localhost:3000', description="Frontend application URL used in email redirections")
     
-    # OAuth Settings
-    OAUTH_REDIRECT_URL: str = Field('http://localhost:8002/api/v1/auth/oauth/callback', description="Backend OAuth callback URL (provider will redirect here)")
-    OAUTH_FRONTEND_SUCCESS_URL: str = Field('http://localhost:8080/auth/success', description="Frontend URL to redirect to after successful OAuth")
-    OAUTH_FRONTEND_ERROR_URL: str = Field('http://localhost:8080/auth/error', description="Frontend URL to redirect to after OAuth error")
-    
-    # Google OAuth
-    GOOGLE_CLIENT_ID: str = Field(..., description="Google OAuth Client ID")
-    GOOGLE_CLIENT_SECRET: str = Field(..., description="Google OAuth Client Secret")
-    
-    # GitHub OAuth
-    GITHUB_CLIENT_ID: str = Field(..., description="GitHub OAuth Client ID")
-    GITHUB_CLIENT_SECRET: str = Field(..., description="GitHub OAuth Client Secret")
-    
     # Supabase Admin (for creating users)
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(default=None, description="Supabase Service Role Key for admin operations")
     
