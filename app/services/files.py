@@ -296,7 +296,10 @@ class FilesService:
         
         """
         
-        query = supabase.table("files").select("*", count="exact")
+        query = supabase.table("files").select(
+            "id, name, size_bytes, content_type, uploaded_by, org_id, project_id, is_deleted, created_at",
+            count="exact"
+        )
         if user_id:
             query = query.eq("uploaded_by", str(user_id))
         if org_id:
@@ -369,7 +372,9 @@ class FilesService:
 
     def get_file(self, file_id: UUID4) -> FileBaseResponse:
         try:
-            response = supabase.table("files").select("*").eq("id", str(file_id)).execute()
+            response = supabase.table("files").select(
+                "id, name, size_bytes, content_type, uploaded_by, is_deleted"
+            ).eq("id", str(file_id)).execute()
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

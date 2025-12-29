@@ -48,8 +48,10 @@ class Settings(BaseSettings):
     # Email Templates Path
     EMAIL_TEMPLATES_PATH: str = "app/templates"
     
-    # redis 
+    # redis cache settings
+    CACHE_TTL: int = Field(default=300, description="Cache TTL in seconds (default: 300 seconds)")
     REDIS_URL: str = 'redis://localhost:6379/0'
+    
     
     # Presigned URL Settings
     S3_PRESIGNED_URL_EXPIRATION: int = Field(

@@ -211,7 +211,13 @@ class TeamService:
             count='exact'
         ).eq('org_id', str(org_id)).order('created_at', desc=True)
         
-        limit, offset, query = apply_pagination(query, limit, offset)
+        # For search with array columns, we need to fetch, filter, then paginate
+        # Fetch a reasonable batch to account for filtering (up to 10x limit or 500, whichever is smaller)
+        if search:
+            fetch_limit = min((limit or 20) * 10, 500)
+            query = query.limit(fetch_limit)
+        else:
+            limit, offset, query = apply_pagination(query, limit, offset)
         
         try:
             response = query.execute()
@@ -221,14 +227,25 @@ class TeamService:
                 detail=f"Failed to get invitations: {e}"
             )
         
-        total = response.count if hasattr(response, 'count') and response.count else 0
+        # Apply search filter before processing (for array email column)
+        filtered_data = response.data if response.data else []
+        if search:
+            filtered_data = [
+                inv for inv in filtered_data
+                if any(search.lower() in email.lower() for email in inv.get('email', []))
+            ]
+            # Apply pagination after filtering
+            if limit and offset is not None:
+                filtered_data = filtered_data[offset:offset + limit]
         
-        if not response.data:
-            return {'invitations': [], 'total': 0, 'limit': limit, 'offset': offset}
+        total = len(filtered_data) if search else (response.count if hasattr(response, 'count') and response.count else 0)
+        
+        if not filtered_data:
+            return {'invitations': [], 'total': total, 'limit': limit, 'offset': offset}
         
         # Get unique user IDs for batch fetching
         inviter_ids = set()
-        for inv in response.data:
+        for inv in filtered_data:
             if inv.get('invited_by'):
                 inviter_ids.add(inv['invited_by'])
         
@@ -238,7 +255,7 @@ class TeamService:
         
         # Get project info for each invitation
         all_project_ids = set()
-        for inv in response.data:
+        for inv in filtered_data:
             if inv.get('added_project_ids'):
                 all_project_ids.update(inv['added_project_ids'])
         
@@ -247,12 +264,7 @@ class TeamService:
             projects_cache = self._batch_get_project_info([UUID4(pid) for pid in all_project_ids])
         
         invitations = []
-        for inv in response.data:
-            # Apply search filter if provided (filter in Python since email is array)
-            if search:
-                email_list = inv.get('email', [])
-                if not any(search.lower() in email.lower() for email in email_list):
-                    continue
+        for inv in filtered_data:
             
             expires_at = datetime.fromisoformat(inv['expires_at'].replace('Z', '+00:00'))
             if expires_at.tzinfo is None:
@@ -322,7 +334,13 @@ class TeamService:
         if role:
             query = query.eq('role', role.value)
         
-        limit, offset, query = apply_pagination(query, limit, offset)
+        # For search, we need to fetch user info first, so fetch more results to account for filtering
+        if search:
+            # Fetch up to 10x the limit or 500, whichever is smaller, to account for filtering
+            fetch_limit = min((limit or 20) * 10, 500)
+            query = query.limit(fetch_limit)
+        else:
+            limit, offset, query = apply_pagination(query, limit, offset)
         
         try:
             response = query.execute()
@@ -331,8 +349,6 @@ class TeamService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get team members: {e}"
             )
-        
-        total = response.count if hasattr(response, 'count') and response.count else 0
         
         if not response.data:
             return {'members': [], 'total': 0, 'limit': limit, 'offset': offset}
@@ -357,9 +373,12 @@ class TeamService:
             if not user_info:
                 continue
             
-            # Apply search filter if provided
+            # Apply search filter if provided (filter on display_name and email from profiles)
             if search:
-                if search.lower() not in user_info['display_name'].lower() and search.lower() not in user_info['email'].lower():
+                search_lower = search.lower()
+                display_name = user_info.get('display_name', '').lower()
+                email = user_info.get('email', '').lower()
+                if search_lower not in display_name and search_lower not in email:
                     continue
             
             members.append(TeamMembersResponse(
@@ -370,7 +389,15 @@ class TeamService:
                 role=TeamUserRole(member['role']),
             ))
         
-        return {'members': members, 'total': len(members), 'limit': limit, 'offset': offset}
+        # Apply pagination after filtering if search was provided
+        if search:
+            total = len(members)
+            if limit and offset is not None:
+                members = members[offset:offset + limit]
+        else:
+            total = response.count if hasattr(response, 'count') and response.count else len(members)
+        
+        return {'members': members, 'total': total, 'limit': limit, 'offset': offset}
     
     def remove_user(
         self,

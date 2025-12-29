@@ -118,6 +118,101 @@ class ChatService:
                 'avatar_url': None
             }
     
+    def _batch_get_user_info(self, user_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch fetch user information with Redis caching and avatar URLs.
+        This method optimizes N+1 queries by fetching all users in a single database call.
+        
+        Args:
+            user_ids: List of user IDs to fetch
+            
+        Returns:
+            Dict mapping user_id (as string) to user info dict with id, display_name, and avatar_url
+        """
+        if not user_ids:
+            return {}
+        
+        result = {}
+        user_ids_str = [str(uid) for uid in user_ids]
+        user_ids_to_fetch = []
+        
+        # First, try to get from cache
+        for user_id_str in user_ids_str:
+            try:
+                cached_user = UserCache.get_user(user_id_str)
+                if cached_user:
+                    avatar_url = None
+                    if cached_user.get('avatar_file_id'):
+                        try:
+                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                        except Exception as e:
+                            logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
+                    
+                    result[user_id_str] = {
+                        'id': cached_user.get('user_id') or cached_user.get('id'),
+                        'display_name': cached_user.get('display_name'),
+                        'avatar_url': avatar_url
+                    }
+                else:
+                    user_ids_to_fetch.append(user_id_str)
+            except Exception as e:
+                logger.warning(f"Error getting user {user_id_str} from cache: {e}")
+                user_ids_to_fetch.append(user_id_str)
+        
+        # Batch fetch missing users from database
+        if user_ids_to_fetch:
+            try:
+                user_response = supabase.table('profiles').select(
+                    'user_id, display_name, avatar_file_id'
+                ).in_('user_id', user_ids_to_fetch).execute()
+                
+                if user_response.data:
+                    for user in user_response.data:
+                        user_id_str = user['user_id']
+                        
+                        avatar_url = None
+                        if user.get('avatar_file_id'):
+                            try:
+                                avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
+                            except Exception as e:
+                                logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
+                        
+                        user_data_for_cache = {
+                            'user_id': user['user_id'],
+                            'display_name': user.get('display_name'),
+                            'avatar_file_id': user.get('avatar_file_id')
+                        }
+                        
+                        UserCache.set_user(user_id_str, user_data_for_cache)
+                        
+                        result[user_id_str] = {
+                            'id': user['user_id'],
+                            'display_name': user.get('display_name'),
+                            'avatar_url': avatar_url
+                        }
+                
+                # Set default for users not found in database
+                for user_id_str in user_ids_to_fetch:
+                    if user_id_str not in result:
+                        result[user_id_str] = {
+                            'id': user_id_str,
+                            'display_name': None,
+                            'avatar_url': None
+                        }
+                        
+            except Exception as e:
+                logger.error(f"Error batch fetching user info: {str(e)}")
+                # Set default for all failed fetches
+                for user_id_str in user_ids_to_fetch:
+                    if user_id_str not in result:
+                        result[user_id_str] = {
+                            'id': user_id_str,
+                            'display_name': None,
+                            'avatar_url': None
+                        }
+        
+        return result
+    
     def send_project_message(
         self,
         project_id: UUID4,
@@ -206,7 +301,7 @@ class ChatService:
         """
         try:
             query = supabase.table('chat_messages').select(
-                '*',
+                'id, body, user_id, project_id, created_at, read_by, message_type, deleted_at, attachments, reply_to_id, edited_at',
                 count='exact'
             ).eq('project_id', str(project_id)).is_('deleted_at', 'null')
             
@@ -228,6 +323,8 @@ class ChatService:
             messages = response.data if response.data else []
             total = response.count if hasattr(response, 'count') else len(messages)
             
+            # Collect all unique user IDs for batch fetching
+            user_ids = set()
             for message in messages:
                 # Normalize read_by field - handle JSONB from database
                 raw_read_by = message.get('read_by')
@@ -236,7 +333,30 @@ class ChatService:
                 else:
                     message['read_by'] = []
                 
-                self._enrich_message_with_user_info(message)
+                # Collect user_id for batch fetching
+                if message.get('user_id'):
+                    try:
+                        user_ids.add(UUID4(message['user_id']))
+                    except Exception:
+                        pass
+            
+            # Batch fetch all user info
+            user_info_cache = {}
+            if user_ids:
+                user_info_cache = self._batch_get_user_info(list(user_ids))
+            
+            # Enrich messages with batch-fetched user info
+            for message in messages:
+                user_id = message.get('user_id')
+                if user_id:
+                    user_id_str = str(user_id)
+                    message['user'] = user_info_cache.get(user_id_str) or {
+                        'id': user_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    message['user'] = None
             
             # Ensure all messages have normalized read_by before creating Pydantic models
             for msg in messages:
@@ -281,7 +401,9 @@ class ChatService:
         try:
             table_name = 'chat_messages' if is_project_message else 'direct_messages'
             
-            message_response = supabase.table(table_name).select('*').eq('id', str(message_id)).execute()
+            # Select only needed fields for permission check
+            fields = 'id, user_id, created_at' if is_project_message else 'id, sender_id, created_at'
+            message_response = supabase.table(table_name).select(fields).eq('id', str(message_id)).execute()
             
             if not message_response.data:
                 raise HTTPException(
@@ -370,7 +492,9 @@ class ChatService:
         try:
             table_name = 'chat_messages' if is_project_message else 'direct_messages'
             
-            message_response = supabase.table(table_name).select('*').eq('id', str(message_id)).execute()
+            # Select only needed fields for permission check
+            fields = 'id, user_id' if is_project_message else 'id, sender_id'
+            message_response = supabase.table(table_name).select(fields).eq('id', str(message_id)).execute()
             
             if not message_response.data:
                 raise HTTPException(
@@ -550,9 +674,9 @@ class ChatService:
             user1_id = min(str(sender_id), str(receiver_id))
             user2_id = max(str(sender_id), str(receiver_id))
             
-            existing_conv = supabase.table('chat_conversations').select('*').eq(
-                'user1_id', user1_id
-            ).eq('user2_id', user2_id).eq(
+            existing_conv = supabase.table('chat_conversations').select(
+                'id, user1_id, user2_id, organization_id, last_message_at, created_at'
+            ).eq('user1_id', user1_id).eq('user2_id', user2_id).eq(
                 'organization_id', str(organization_id)
             ).execute()
             
@@ -611,7 +735,7 @@ class ChatService:
         """
         try:
             query = supabase.table('chat_conversations').select(
-                '*',
+                'id, user1_id, user2_id, organization_id, last_message_at, created_at',
                 count='exact'
             ).eq('organization_id', str(organization_id)).or_(
                 f"user1_id.eq.{user_id},user2_id.eq.{user_id}"
@@ -624,9 +748,56 @@ class ChatService:
             conversations = response.data if response.data else []
             total = response.count if hasattr(response, 'count') else len(conversations)
             
+            # Collect all unique other_user_ids and conversation IDs for batch fetching
+            user_ids = set()
+            conversation_ids = []
             for conversation in conversations:
-                self._enrich_conversation_with_user_info(conversation, user_id)
-                self._add_unread_count_to_conversation(conversation, user_id)
+                other_user_id = conversation.get('user2_id') if conversation.get('user1_id') == str(user_id) else conversation.get('user1_id')
+                if other_user_id:
+                    try:
+                        user_ids.add(UUID4(other_user_id))
+                    except Exception:
+                        pass
+                conversation_ids.append(conversation['id'])
+            
+            # Batch fetch all user info
+            user_info_cache = {}
+            if user_ids:
+                user_info_cache = self._batch_get_user_info(list(user_ids))
+            
+            # Batch fetch all unread counts for conversations
+            unread_counts = {}
+            if conversation_ids:
+                conversation_ids_str = [str(cid) for cid in conversation_ids]
+                unread_response = supabase.table('chat_notifications').select(
+                    'reference_id, unread_count'
+                ).eq('user_id', str(user_id)).eq('chat_type', 'direct').in_(
+                    'reference_id', conversation_ids_str
+                ).execute()
+                
+                if unread_response.data:
+                    unread_counts = {
+                        item['reference_id']: item.get('unread_count', 0) or 0
+                        for item in unread_response.data
+                    }
+            
+            # Enrich conversations with batch-fetched user info and unread counts
+            for conversation in conversations:
+                other_user_id = conversation.get('user2_id') if conversation.get('user1_id') == str(user_id) else conversation.get('user1_id')
+                
+                if other_user_id:
+                    other_user_id_str = str(other_user_id)
+                    conversation['other_user'] = user_info_cache.get(other_user_id_str) or {
+                        'id': other_user_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    conversation['other_user'] = None
+                
+                # Set unread count from batch-fetched data
+                conversation_id_str = str(conversation['id'])
+                conversation['unread_count'] = unread_counts.get(conversation_id_str, 0)
             
             return {
                 'conversations': [ConversationResponse(**conv) for conv in conversations],
@@ -678,10 +849,27 @@ class ChatService:
             
             project_ids = [p['id'] for p in projects_response.data]
             
+            # Batch fetch all unread counts for projects
+            unread_counts = {}
+            if project_ids:
+                project_ids_str = [str(pid) for pid in project_ids]
+                unread_response = supabase.table('chat_notifications').select(
+                    'reference_id, unread_count'
+                ).eq('user_id', str(user_id)).eq('chat_type', 'project').in_(
+                    'reference_id', project_ids_str
+                ).execute()
+                
+                if unread_response.data:
+                    unread_counts = {
+                        item['reference_id']: item.get('unread_count', 0) or 0
+                        for item in unread_response.data
+                    }
+            
             # Get last message for each project
             conversations_data = []
             for project in projects_response.data:
                 project_id = project['id']
+                project_id_str = str(project_id)
                 
                 # Get last message
                 last_message_response = supabase.table('chat_messages').select(
@@ -711,14 +899,8 @@ class ChatService:
                     else:
                         last_message_preview = '[File attachment]'
                 
-                # Get unread count
-                unread_response = supabase.table('chat_notifications').select('unread_count').eq(
-                    'user_id', str(user_id)
-                ).eq('chat_type', 'project').eq('reference_id', project_id).execute()
-                
-                unread_count = 0
-                if unread_response.data and len(unread_response.data) > 0:
-                    unread_count = unread_response.data[0].get('unread_count', 0) or 0
+                # Get unread count from batch-fetched data
+                unread_count = unread_counts.get(project_id_str, 0)
                 
                 # Get project avatar URL if available
                 avatar_url = None
@@ -824,8 +1006,8 @@ class ChatService:
             self._enrich_dm_with_user_info(message, sender_id, str(receiver_id) if receiver_id else None)
             
             try:
-                sender_profile = self._get_user_profile(sender_id)
-                sender_name = sender_profile.get('display_name', 'Someone')
+                sender_profile = self.files_service._get_user_profile(sender_id)
+                sender_name = sender_profile.display_name or 'Someone'
                 message_preview = message_data.body[:100] if message_data.body else "Sent an attachment"
                 
                 trigger_direct_message_notification(
@@ -877,7 +1059,7 @@ class ChatService:
             conversation = self._get_conversation(conversation_id, user_id)
             
             query = supabase.table('direct_messages').select(
-                '*',
+                'id, body, sender_id, receiver_id, created_at, deleted_at, message_type, attachments, read_at, organization_id',
                 count='exact'
             ).or_(
                 f"sender_id.eq.{conversation['user1_id']},sender_id.eq.{conversation['user2_id']}"
@@ -900,8 +1082,49 @@ class ChatService:
             messages = response.data if response.data else []
             total = response.count if hasattr(response, 'count') else len(messages)
             
+            # Collect all unique sender and receiver IDs for batch fetching
+            user_ids = set()
             for message in messages:
-                self._enrich_dm_with_user_info(message)
+                if message.get('sender_id'):
+                    try:
+                        user_ids.add(UUID4(message['sender_id']))
+                    except Exception:
+                        pass
+                if message.get('receiver_id'):
+                    try:
+                        user_ids.add(UUID4(message['receiver_id']))
+                    except Exception:
+                        pass
+            
+            # Batch fetch all user info
+            user_info_cache = {}
+            if user_ids:
+                user_info_cache = self._batch_get_user_info(list(user_ids))
+            
+            # Enrich messages with batch-fetched user info
+            for message in messages:
+                sender_id = message.get('sender_id')
+                receiver_id = message.get('receiver_id')
+                
+                if sender_id:
+                    sender_id_str = str(sender_id)
+                    message['sender'] = user_info_cache.get(sender_id_str) or {
+                        'id': sender_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    message['sender'] = None
+                
+                if receiver_id:
+                    receiver_id_str = str(receiver_id)
+                    message['receiver'] = user_info_cache.get(receiver_id_str) or {
+                        'id': receiver_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    message['receiver'] = None
             
             return {
                 'messages': [DirectMessageResponse(**msg) for msg in messages],
@@ -1047,9 +1270,9 @@ class ChatService:
             NotificationSummaryResponse: The unread summary
         """
         try:
-            notifications_response = supabase.table('chat_notifications').select('*').eq(
-                'user_id', str(user_id)
-            ).gt('unread_count', 0).execute()
+            notifications_response = supabase.table('chat_notifications').select(
+                'unread_count, chat_type, reference_id, updated_at'
+            ).eq('user_id', str(user_id)).gt('unread_count', 0).execute()
             
             notifications = notifications_response.data if notifications_response.data else []
             
@@ -1262,9 +1485,9 @@ class ChatService:
     
     def _get_conversation(self, conversation_id: UUID4, user_id: UUID4) -> Dict[str, Any]:
         """Get and verify conversation access"""
-        conversation_response = supabase.table('chat_conversations').select('*').eq(
-            'id', str(conversation_id)
-        ).execute()
+        conversation_response = supabase.table('chat_conversations').select(
+            'id, user1_id, user2_id, organization_id, last_message_at, created_at'
+        ).eq('id', str(conversation_id)).execute()
         
         if not conversation_response.data:
             raise HTTPException(
@@ -1316,28 +1539,70 @@ class ChatService:
             project_ids = [p['project_id'] for p in projects_response.data]
             
             results = []
-            for project_id in project_ids[:10]:
-                messages_response = supabase.table('chat_messages').select('*', count='exact').eq(
-                    'project_id', project_id
-                ).textSearch('search_vector', f"'{search_term}'").is_('deleted_at', 'null').limit(5).execute()
+            all_messages = []
+            messages_count = 0
+            
+            # Use single query with IN clause across all projects (not limited to 10)
+            if project_ids:
+                # Convert to strings for IN clause
+                project_ids_str = [str(pid) for pid in project_ids]
+                messages_response = supabase.table('chat_messages').select(
+                    'id, body, user_id, project_id, created_at, read_by, message_type, deleted_at, attachments, reply_to_id, edited_at',
+                    count='exact'
+                ).in_('project_id', project_ids_str).textSearch(
+                    'search_vector', f"'{search_term}'"
+                ).is_('deleted_at', 'null').order('created_at', desc=True).limit(limit).execute()
                 
                 if messages_response.data:
-                    for msg in messages_response.data:
-                        self._enrich_message_with_user_info(msg, UUID4(msg['user_id']) if msg.get('user_id') else None)
-                        results.append({
-                            'message_id': msg['id'],
-                            'chat_type': 'project',
-                            'reference_id': msg['project_id'],
-                            'body': msg.get('body'),
-                            'user_id': msg['user_id'],
-                            'user': msg.get('user'),
-                            'created_at': msg['created_at'],
-                            'relevance_score': 1.0
-                        })
+                    all_messages = messages_response.data
+                
+                # Get count from response if available
+                if hasattr(messages_response, 'count'):
+                    messages_count = messages_response.count
+                else:
+                    messages_count = len(all_messages)
+            
+            # Collect all unique user IDs for batch fetching
+            user_ids = set()
+            for msg in all_messages:
+                if msg.get('user_id'):
+                    try:
+                        user_ids.add(UUID4(msg['user_id']))
+                    except Exception:
+                        pass
+            
+            # Batch fetch all user info
+            user_info_cache = {}
+            if user_ids:
+                user_info_cache = self._batch_get_user_info(list(user_ids))
+            
+            # Enrich messages and build results
+            for msg in all_messages:
+                user_id = msg.get('user_id')
+                if user_id:
+                    user_id_str = str(user_id)
+                    msg['user'] = user_info_cache.get(user_id_str) or {
+                        'id': user_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    msg['user'] = None
+                
+                results.append({
+                    'message_id': msg['id'],
+                    'chat_type': 'project',
+                    'reference_id': msg['project_id'],
+                    'body': msg.get('body'),
+                    'user_id': msg['user_id'],
+                    'user': msg.get('user'),
+                    'created_at': msg['created_at'],
+                    'relevance_score': 1.0
+                })
             
             return {
                 'messages': results,
-                'total': projects_response.count,
+                'total': messages_count,
                 'limit': limit,
                 'offset': offset
             }
@@ -1348,7 +1613,10 @@ class ChatService:
     def _search_direct_messages(self, user_id: UUID4, organization_id: UUID4, search_term: str, limit: int, offset: int) -> List[Dict]:
         """Search direct messages accessible to user"""
         try:
-            query = supabase.table('direct_messages').select('*', count='exact').or_(
+            query = supabase.table('direct_messages').select(
+                'id, body, sender_id, receiver_id, created_at, deleted_at, message_type, attachments, read_at, organization_id',
+                count='exact'
+            ).or_(
                 f"sender_id.eq.{user_id},receiver_id.eq.{user_id}"
             ).eq('organization_id', str(organization_id)).textSearch(
                 'search_vector', f"'{search_term}'"
@@ -1359,19 +1627,62 @@ class ChatService:
             messages_response = query.execute()            
             
             results = []
-            if messages_response.data:
-                for msg in messages_response.data:
-                    self._enrich_dm_with_user_info(msg)
-                    results.append({
-                        'message_id': msg['id'],
-                        'chat_type': 'direct',
-                        'reference_id': msg['id'],
-                        'body': msg.get('body'),
-                        'user_id': msg['sender_id'],
-                        'user': msg.get('sender'),
-                        'created_at': msg['created_at'],
-                        'relevance_score': 1.0
-                    })
+            messages = messages_response.data if messages_response.data else []
+            
+            # Collect all unique sender and receiver IDs for batch fetching
+            user_ids = set()
+            for msg in messages:
+                if msg.get('sender_id'):
+                    try:
+                        user_ids.add(UUID4(msg['sender_id']))
+                    except Exception:
+                        pass
+                if msg.get('receiver_id'):
+                    try:
+                        user_ids.add(UUID4(msg['receiver_id']))
+                    except Exception:
+                        pass
+            
+            # Batch fetch all user info
+            user_info_cache = {}
+            if user_ids:
+                user_info_cache = self._batch_get_user_info(list(user_ids))
+            
+            # Enrich messages and build results
+            for msg in messages:
+                sender_id = msg.get('sender_id')
+                receiver_id = msg.get('receiver_id')
+                
+                if sender_id:
+                    sender_id_str = str(sender_id)
+                    msg['sender'] = user_info_cache.get(sender_id_str) or {
+                        'id': sender_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    msg['sender'] = None
+                
+                if receiver_id:
+                    receiver_id_str = str(receiver_id)
+                    msg['receiver'] = user_info_cache.get(receiver_id_str) or {
+                        'id': receiver_id_str,
+                        'display_name': None,
+                        'avatar_url': None
+                    }
+                else:
+                    msg['receiver'] = None
+                
+                results.append({
+                    'message_id': msg['id'],
+                    'chat_type': 'direct',
+                    'reference_id': msg['id'],
+                    'body': msg.get('body'),
+                    'user_id': msg['sender_id'],
+                    'user': msg.get('sender'),
+                    'created_at': msg['created_at'],
+                    'relevance_score': 1.0
+                })
             
             return {
                 'messages': results,
@@ -1390,7 +1701,9 @@ class ChatService:
                 response = supabase.table('projects').select('name').eq('id', reference_id).execute()
                 return response.data[0]['name'] if response.data else 'Unknown Project'
             else:
-                response = supabase.table('chat_conversations').select('*').eq('id', reference_id).execute()
+                response = supabase.table('chat_conversations').select(
+                    'user1_id, user2_id'
+                ).eq('id', reference_id).execute()
                 if response.data:
                     conv = response.data[0]
                     user_id = conv.get('user2_id')
