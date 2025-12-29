@@ -29,6 +29,9 @@ from app.utils.inbox_helpers import trigger_organization_invitation_notification
 
 from app.utils.redis_cache import cache_service, UserCache
 from app.tasks.tasks import send_email_task
+import logging
+
+logger = logging.getLogger(__name__)
 
 settings = Settings()
 
@@ -362,6 +365,11 @@ class TeamService:
                 # Pydantic will automatically convert it to TeamUserRole enum
                 members_list = []
                 for member_dict in cached.get('members', []):
+                    # Ensure email exists (required by schema)
+                    if not member_dict.get('email'):
+                        logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
+                        continue
+                    
                     # Ensure role is a string (not Enum class or instance)
                     if 'role' in member_dict:
                         role_value = member_dict['role']
@@ -442,10 +450,17 @@ class TeamService:
                 # Convert string to Enum
                 role_enum = TeamUserRole(str(role_value))
             
+            # Ensure email is available (required by schema)
+            email = user_info.get('email')
+            if not email:
+                # Skip users without email or try to fetch it
+                logger.warning(f"User {user_info['id']} has no email, skipping from team members")
+                continue
+            
             members.append(TeamMembersResponse(
                 id=user_info['id'],
-                display_name=user_info['display_name'],
-                email=user_info['email'],
+                display_name=user_info.get('display_name', ''),
+                email=email,
                 avatar_url=user_info.get('avatar_url'),
                 role=role_enum,
             ))
