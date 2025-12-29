@@ -1095,6 +1095,7 @@ class ChatService:
         except HTTPException:
             raise
         except Exception as e:
+            raise e
             logger.error(f"Error sending direct message: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
