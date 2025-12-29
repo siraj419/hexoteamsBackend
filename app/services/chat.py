@@ -1087,6 +1087,7 @@ class ChatService:
                     conversation_id=conversation_id,
                 )
             except Exception as e:
+                raise e
                 logger.error(f"Failed to send DM inbox notification: {e}")
             
             return DirectMessageResponse(**message)
