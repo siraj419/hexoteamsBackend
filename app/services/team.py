@@ -26,13 +26,9 @@ from app.services.project import ProjectService
 from app.services.files import FilesService
 from app.utils import calculate_time_ago, apply_pagination
 from app.utils.inbox_helpers import trigger_organization_invitation_notification
-<<<<<<< HEAD
-from app.utils.redis_cache import redis_client
-=======
+
 from app.utils.redis_cache import cache_service, UserCache
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
 from app.tasks.tasks import send_email_task
-import json
 
 settings = Settings()
 
@@ -822,51 +818,14 @@ class TeamService:
         return user_data
     
     def _batch_get_user_info(self, user_ids: List[UUID4]) -> Dict[str, Dict[str, Any]]:
-<<<<<<< HEAD
-        """Batch fetch user info with caching."""
-        if not user_ids:
-            return {}
-        
-        CACHE_TTL = 300  # 5 minutes cache
-=======
         """Batch fetch user info - Uses UserCache for caching."""
         if not user_ids:
             return {}
         
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
         users_dict = {}
         uncached_user_ids = []
         
         # Check cache for each user
-<<<<<<< HEAD
-        if redis_client:
-            for user_id in user_ids:
-                user_id_str = str(user_id)
-                cache_key = f"user_info:{user_id_str}"
-                try:
-                    cached = redis_client.get(cache_key)
-                    if cached:
-                        try:
-                            cached_user = json.loads(cached)
-                            # Validate cached data has required keys
-                            if isinstance(cached_user, dict) and 'id' in cached_user and 'display_name' in cached_user and 'email' in cached_user:
-                                users_dict[user_id_str] = cached_user
-                            else:
-                                # Invalid cache structure, fetch from DB
-                                uncached_user_ids.append(user_id)
-                        except (json.JSONDecodeError, KeyError, TypeError) as e:
-                            # Invalid cache data, fetch from DB
-                            uncached_user_ids.append(user_id)
-                    else:
-                        uncached_user_ids.append(user_id)
-                except Exception as e:
-                    # Cache error, fetch from DB
-                    uncached_user_ids.append(user_id)
-        else:
-            uncached_user_ids = list(user_ids)
-        
-        # Fetch uncached users from database
-=======
         for user_id in user_ids:
             user_id_str = str(user_id)
             cached_user = UserCache.get_user(user_id_str)
@@ -888,7 +847,6 @@ class TeamService:
                 uncached_user_ids.append(user_id)
         
         # Batch fetch uncached users
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
         if uncached_user_ids:
             try:
                 user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in uncached_user_ids]
@@ -903,37 +861,18 @@ class TeamService:
                 avatar_url = None
                 if profile.get('avatar_file_id'):
                     try:
-<<<<<<< HEAD
-                        avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
-=======
                         avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
                     except Exception:
                         pass
                 
                 user_id_str = str(profile['user_id'])
-<<<<<<< HEAD
-                user_data = {
-=======
                 users_dict[user_id_str] = {
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
                     'id': profile['user_id'],
                     'display_name': profile['display_name'],
                     'email': profile['email'],
                     'avatar_url': avatar_url,
                 }
                 
-<<<<<<< HEAD
-                users_dict[user_id_str] = user_data
-                
-                # Cache the user info
-                if redis_client:
-                    try:
-                        cache_key = f"user_info:{user_id_str}"
-                        redis_client.setex(cache_key, CACHE_TTL, json.dumps(user_data))
-                    except Exception:
-                        pass  # Continue even if caching fails
-=======
                 # Cache the user data
                 user_data_for_cache = {
                     'id': profile['user_id'],
@@ -941,7 +880,6 @@ class TeamService:
                     'avatar_file_id': profile.get('avatar_file_id'),
                 }
                 UserCache.set_user(user_id_str, user_data_for_cache)
->>>>>>> 9ee6588f48ee12153325515421f8961ae6d6bdec
         
         return users_dict
     
