@@ -1028,6 +1028,10 @@ class ChatService:
             message = response.data[0]
             message_id = message['id']
             
+            # Ensure edited_at is set (None for new messages)
+            if 'edited_at' not in message:
+                message['edited_at'] = None
+            
             # Link attachments to the message if any
             if message_data.attachments:
                 self._link_attachments_to_message(message_data.attachments, message_id, 'direct')
@@ -1088,7 +1092,7 @@ class ChatService:
             conversation = self._get_conversation(conversation_id, user_id)
             
             query = supabase.table('direct_messages').select(
-                'id, body, sender_id, receiver_id, created_at, deleted_at, message_type, attachments, read_at, organization_id',
+                'id, body, sender_id, receiver_id, created_at, edited_at, deleted_at, message_type, attachments, read_at, organization_id',
                 count='exact'
             ).or_(
                 f"sender_id.eq.{conversation['user1_id']},sender_id.eq.{conversation['user2_id']}"
@@ -1134,6 +1138,10 @@ class ChatService:
             for message in messages:
                 sender_id = message.get('sender_id')
                 receiver_id = message.get('receiver_id')
+                
+                # Ensure edited_at is set (None if not present)
+                if 'edited_at' not in message:
+                    message['edited_at'] = None
                 
                 if sender_id:
                     sender_id_str = str(sender_id)
