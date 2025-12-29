@@ -101,7 +101,7 @@ class InboxService:
                 insert_data['reference_id'] = str(reference_id)
             
             logger.info(f"Creating inbox notification for user {user_id}: {title}")
-            response = supabase.table('inbox').insert(insert_data).execute()
+            response = supabase.table('inbox').insert(insert_data).select('*').execute()
             logger.info(f"Inbox notification created successfully: {response.data}")
         except AuthApiError as e:
             logger.error(f"Database error creating inbox: {e}", exc_info=True)
@@ -124,6 +124,15 @@ class InboxService:
             )
         
         inbox_data = response.data[0]
+        
+        # Validate that required fields are present
+        if 'id' not in inbox_data:
+            logger.error(f"Inbox insert response missing 'id' field. Response data: {inbox_data}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create inbox: missing id in response"
+            )
+        
         user_time_zone = self._get_user_time_zone(user_id)
         message_time = calculate_time_ago(inbox_data['created_at'], user_time_zone)
         
