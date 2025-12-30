@@ -449,10 +449,10 @@ class TaskService:
             org_id = None
             if project_id:
                 try:
-                    project_response = supabase.table('projects').select('name, organization_id').eq('id', str(project_id)).execute()
+                    project_response = supabase.table('projects').select('name, org_id').eq('id', str(project_id)).execute()
                     if project_response.data:
                         project_name = project_response.data[0].get('name', 'Unknown Project')
-                        org_id = project_response.data[0].get('organization_id')
+                        org_id = project_response.data[0].get('org_id')
                 except Exception:
                     pass
             
