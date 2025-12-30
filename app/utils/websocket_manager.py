@@ -620,6 +620,10 @@ class ConnectionManager:
         # Combine both sets (Redis + local)
         connection_ids = redis_connection_ids | local_connection_ids
         
+        logger.info(f"Redis connection IDs: {redis_connection_ids}")
+        logger.info(f"Local connection IDs: {local_connection_ids}")
+        logger.info(f"Connection IDs: {connection_ids}")
+        
         # Verify which connection IDs actually have websockets and clean up stale metadata
         valid_connection_ids = set()
         stale_connection_ids = []
