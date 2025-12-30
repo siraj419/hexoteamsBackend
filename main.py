@@ -1,12 +1,42 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import asyncio
 import uvicorn
-
+import logging
 
 from app.core import settings
 from app.routers import base_router
+from app.utils.notification_subscriber import start_notification_subscriber
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan events"""
+    logger.info("Starting application...")
+    
+    subscriber_task = None
+    if settings.REDIS_URL:
+        try:
+            subscriber_task = asyncio.create_task(start_notification_subscriber())
+            logger.info("Notification subscriber task started")
+        except Exception as e:
+            logger.error(f"Failed to start notification subscriber: {e}")
+    
+    yield
+    
+    logger.info("Shutting down application...")
+    if subscriber_task:
+        subscriber_task.cancel()
+        try:
+            await subscriber_task
+        except asyncio.CancelledError:
+            logger.info("Notification subscriber task cancelled")
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

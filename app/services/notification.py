@@ -7,8 +7,8 @@ import asyncio
 
 from app.schemas.inbox import InboxEventType, InboxResponse
 from app.services.inbox import InboxService
-from app.utils.websocket_manager import manager
 from app.utils.redis_cache import cache_service
+from app.utils.notification_pubsub import publish_notification_event
 from app.core import supabase
 from app.tasks.tasks import send_email_task
 from supabase_auth.errors import AuthApiError
@@ -260,23 +260,25 @@ class NotificationService:
         org_id: UUID4,
         inbox_data: InboxResponse,
     ):
-        """Send browser notification via WebSocket"""
+        """Publish browser notification event to Redis Pub/Sub"""
         try:
             unread_count = self.inbox_service.get_unread_count(user_id, org_id)
             
-            await manager.broadcast_inbox_notification(
-                org_id=str(org_id),
+            payload = {
+                "data": inbox_data.model_dump(mode='json'),
+                "unread_count": unread_count,
+            }
+            
+            publish_notification_event(
                 user_id=str(user_id),
-                message={
-                    "type": "inbox_new",
-                    "data": inbox_data.model_dump(mode='json'),
-                    "unread_count": unread_count,
-                }
+                org_id=str(org_id),
+                notification_type="inbox_new",
+                payload=payload
             )
             
-            logger.info(f"Browser notification sent to user {user_id}")
+            logger.info(f"Browser notification event published for user {user_id}")
         except Exception as e:
-            logger.error(f"Failed to send browser notification: {e}")
+            logger.error(f"Failed to publish browser notification event: {e}")
     
     def _send_email_notification(
         self,
