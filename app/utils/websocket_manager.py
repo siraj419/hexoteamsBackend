@@ -218,6 +218,8 @@ class ConnectionManager:
         """Get local connection IDs filtered by type and optional filters"""
         local_conn_ids = set()
         
+        logger.info(f"Local connections: {self.local_connections}")
+        
         for connection_id, metadata in self.connection_metadata.items():
             if metadata.get("connection_type") != connection_type:
                 continue
