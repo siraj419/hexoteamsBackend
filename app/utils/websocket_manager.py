@@ -635,6 +635,9 @@ class ConnectionManager:
                 # Connection ID exists in Redis/local metadata but websocket is missing
                 logger.warning(f"Connection {conn_id} found in Redis/local metadata but websocket missing from local_connections")
                 stale_connection_ids.append(conn_id)
+            
+        logger.info(f"Valid connection IDs: {valid_connection_ids}")
+        logger.info(f"Stale connection IDs: {stale_connection_ids}")
         
         # Clean up stale metadata
         for conn_id in stale_connection_ids:
