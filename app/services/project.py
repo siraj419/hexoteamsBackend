@@ -1226,6 +1226,48 @@ class ProjectService:
             updated_at=updated_project['updated_at'],
             favourite_project=self._is_favourite_project(project_id, user_id),
         )
+    
+    def update_project_progress(self, project_id: UUID4) -> None:
+        """
+        Calculate and update project progress_percentage based on completed tasks.
+        Only counts top-level tasks (where parent_id is null).
+        Progress = (completed_tasks / total_tasks) * 100
+        """
+        try:
+            project_id_str = str(project_id)
+            
+            tasks_response = supabase.table('tasks').select(
+                'id, status'
+            ).eq('project_id', project_id_str).is_('parent_id', 'null').execute()
+            
+            if not tasks_response.data:
+                total_tasks = 0
+                completed_tasks = 0
+            else:
+                total_tasks = len(tasks_response.data)
+                completed_tasks = sum(
+                    1 for task in tasks_response.data 
+                    if task.get('status') == TaskStatus.COMPLETED.value
+                )
+            
+            if total_tasks == 0:
+                progress_percentage = 0
+            else:
+                progress_percentage = int((completed_tasks / total_tasks) * 100)
+            
+            supabase.table('projects').update({
+                'progress_percentage': progress_percentage,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }).eq('id', project_id_str).execute()
+            
+            logger.debug(f"Updated project {project_id} progress to {progress_percentage}% ({completed_tasks}/{total_tasks} tasks completed)")
+            
+            ProjectSummaryCache.delete_summary(project_id_str)
+            
+        except AuthApiError as e:
+            logger.error(f"Failed to update project progress for {project_id}: {e}")
+        except Exception as e:
+            logger.error(f"Error updating project progress for {project_id}: {e}", exc_info=True)
         
     def join_project(
         self,

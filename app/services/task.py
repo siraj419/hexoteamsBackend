@@ -619,7 +619,9 @@ class TaskService:
             )
         
         # Record activity: status changed
+        status_changed = False
         if task_request.status and old_status != task_request.status.value:
+            status_changed = True
             try:
                 actor_info = self._get_user_info(user_id)
                 self.activity_service.add_activity(
@@ -632,10 +634,23 @@ class TaskService:
                 # Don't fail task update if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
         
-        # Invalidate project summary cache
+        # Invalidate project summary cache and update project progress
         project_id = response.data[0].get('project_id')
         if project_id:
             ProjectSummaryCache.delete_summary(str(project_id))
+            
+            # Update project progress when task status changed to/from completed
+            if status_changed and task_request.status:
+                is_completed_status = task_request.status.value == TaskStatus.COMPLETED.value
+                was_completed_status = old_status == TaskStatus.COMPLETED.value
+                
+                if is_completed_status or was_completed_status:
+                    try:
+                        from app.services.project import ProjectService
+                        project_service = ProjectService()
+                        project_service.update_project_progress(UUID4(project_id))
+                    except Exception as e:
+                        logger.error(f"Failed to update project progress: {e}", exc_info=True)
         
         return TaskUpdateResponse(
             id=response.data[0]['id'],
@@ -736,10 +751,23 @@ class TaskService:
                 # Don't fail status change if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
         
-        # Invalidate project summary cache
+        # Invalidate project summary cache and update project progress
         project_id = response.data[0].get('project_id')
         if project_id:
             ProjectSummaryCache.delete_summary(str(project_id))
+            
+            # Update project progress when task is completed or uncompleted
+            if old_status != status_request.status.value:
+                is_completed_status = status_request.status.value == TaskStatus.COMPLETED.value
+                was_completed_status = old_status == TaskStatus.COMPLETED.value
+                
+                if is_completed_status or was_completed_status:
+                    try:
+                        from app.services.project import ProjectService
+                        project_service = ProjectService()
+                        project_service.update_project_progress(UUID4(project_id))
+                    except Exception as e:
+                        logger.error(f"Failed to update project progress: {e}", exc_info=True)
         
         assignee = None
         if response.data[0].get('assignee_id'):
