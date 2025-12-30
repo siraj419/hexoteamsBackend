@@ -71,12 +71,14 @@ class NotificationService:
         
         user_preferences = self._get_user_preferences(user_id)
         
-        if send_browser and user_preferences.get('browser_notifications', False):
-            await self._send_browser_notification(
-                user_id=user_id,
-                org_id=org_id,
-                inbox_data=inbox_response,
-            )
+        logger.info(f"User preferences: {user_preferences}")
+        
+        # if send_browser and user_preferences.get('browser_notifications', False):
+        await self._send_browser_notification(
+            user_id=user_id,
+            org_id=org_id,
+            inbox_data=inbox_response,
+        )
         
         if send_email and user_preferences.get('email_notifications', False):
             self._send_email_notification(
