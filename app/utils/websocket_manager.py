@@ -361,58 +361,67 @@ class ConnectionManager:
         logger.info(f"User {user_id} disconnected from inbox for org {org_id} (connection: {connection_id})")
     
     async def _send_to_connection(self, connection_id: str, message: dict) -> bool:
-        """Send message to a specific connection"""
-        # Check if connection is local
-        if connection_id in self.local_connections:
-            try:
-                websocket = self.local_connections[connection_id]
-                
-                # Check websocket state before sending
-                if websocket.client_state.name != "CONNECTED":
-                    logger.warning(f"WebSocket {connection_id} is not in CONNECTED state: {websocket.client_state.name}")
-                    # Clean up disconnected connection
-                    metadata = self.connection_metadata.get(connection_id, {})
-                    del self.local_connections[connection_id]
-                    if connection_id in self.connection_metadata:
-                        del self.connection_metadata[connection_id]
-                    self._remove_connection_metadata(connection_id, metadata)
-                    return False
-                
-                data = json.dumps(message)
-                await websocket.send_text(data)
-                logger.debug(f"Successfully sent message to connection {connection_id}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to send to local connection {connection_id}: {e}", exc_info=True)
-                # Clean up failed connection
-                if connection_id in self.local_connections:
-                    metadata = self.connection_metadata.get(connection_id, {})
-                    del self.local_connections[connection_id]
-                    if connection_id in self.connection_metadata:
-                        del self.connection_metadata[connection_id]
-                    self._remove_connection_metadata(connection_id, metadata)
-                return False
+        """
+        Send message to a connection if found in local storage or Redis.
+        Returns True if message was sent successfully, False otherwise.
+        """
+        # Check local storage first - this is the source of truth for active connections
+        websocket = self.local_connections.get(connection_id)
+        if websocket:
+            return await self._send_to_local_websocket(connection_id, websocket, message)
         
-        # Connection is not in local storage - check if it exists in Redis
+        # Not in local storage - check Redis metadata
         metadata = self._get_connection_metadata(connection_id)
-        if metadata:
-            instance_id = metadata.get("instance_id")
-            if instance_id != INSTANCE_ID:
-                logger.debug(f"Connection {connection_id} is on instance {instance_id}, not local (current: {INSTANCE_ID})")
-                # In a multi-instance setup, you'd publish to Redis pub/sub here
-                # and have each instance check if the connection is local
-                # For now, we return False as the connection is not local
-                return False
-            else:
-                # Connection metadata exists but websocket is not in local_connections
-                # This means the connection was lost but metadata wasn't cleaned up
-                logger.warning(f"Connection {connection_id} has metadata but websocket not found locally. Cleaning up stale metadata.")
-                self._remove_connection_metadata(connection_id, metadata)
-                return False
-        else:
-            logger.warning(f"Connection {connection_id} not found in local storage or Redis metadata")
+        if not metadata:
+            logger.debug(f"Connection {connection_id} not found in local storage or Redis")
+            return False
         
-        return False
+        # Connection exists in Redis - check instance
+        instance_id = metadata.get("instance_id")
+        
+        if instance_id == INSTANCE_ID:
+            # Same instance but not in local storage = stale metadata
+            logger.warning(f"Connection {connection_id} has metadata in Redis but websocket missing locally. Cleaning up stale metadata.")
+            self._remove_connection_metadata(connection_id, metadata)
+            return False
+        else:
+            # Connection is on another instance - can't send directly
+            # In a multi-instance setup, you'd use Redis pub/sub here
+            logger.debug(f"Connection {connection_id} is on instance {instance_id}, not local (current: {INSTANCE_ID})")
+            return False
+    
+    async def _send_to_local_websocket(self, connection_id: str, websocket: WebSocket, message: dict) -> bool:
+        """Send message to a local websocket connection"""
+        try:
+            # Check websocket state before sending
+            if websocket.client_state.name != "CONNECTED":
+                logger.warning(f"WebSocket {connection_id} not CONNECTED (state: {websocket.client_state.name})")
+                self._cleanup_connection(connection_id)
+                return False
+            
+            # Send message
+            data = json.dumps(message)
+            await websocket.send_text(data)
+            logger.debug(f"Message sent to connection {connection_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send to connection {connection_id}: {e}", exc_info=True)
+            self._cleanup_connection(connection_id)
+            return False
+    
+    def _cleanup_connection(self, connection_id: str) -> None:
+        """Remove connection from local storage and Redis"""
+        metadata = self.connection_metadata.get(connection_id, {})
+        
+        if connection_id in self.local_connections:
+            del self.local_connections[connection_id]
+        
+        if connection_id in self.connection_metadata:
+            del self.connection_metadata[connection_id]
+        
+        if metadata:
+            self._remove_connection_metadata(connection_id, metadata)
     
     async def broadcast_to_project(
         self, 
@@ -574,25 +583,32 @@ class ConnectionManager:
         
         connection_id = self._generate_connection_id()
         
-        # Store websocket locally
-        self.local_connections[connection_id] = websocket
-        
-        # Store metadata in Redis
+        # Store metadata first (before websocket) to ensure consistency
         metadata = {
             "org_id": org_id,
             "user_id": user_id,
             "connection_type": "inbox"
         }
         self.connection_metadata[connection_id] = metadata
-        self._store_connection_metadata(connection_id, user_id, "inbox", org_id=org_id)
         
-        connection_key = f"inbox:{org_id}:{user_id}"
-        logger.info(f"User {user_id} connected to inbox for org {org_id} (connection: {connection_id})")
+        # Store websocket locally
+        self.local_connections[connection_id] = websocket
+        
+        # Store metadata in Redis
+        redis_success = self._store_connection_metadata(connection_id, user_id, "inbox", org_id=org_id)
+        
+        if not redis_success:
+            logger.warning(f"Failed to store connection metadata in Redis for {connection_id}, but websocket stored locally")
+        
+        # Verify storage
+        if connection_id not in self.local_connections:
+            logger.error(f"CRITICAL: Connection {connection_id} not found in local_connections after storage!")
+        else:
+            logger.info(f"User {user_id} connected to inbox for org {org_id} (connection: {connection_id}, local: {connection_id in self.local_connections}, redis: {redis_success})")
     
     async def broadcast_inbox_notification(self, org_id: str, user_id: str, message: dict):
         """Broadcast inbox notification to user's connections for specific org"""
         connection_key = f"{org_id}:{user_id}"
-        
         
         # Get connections from Redis
         key = self._get_redis_key("inbox", connection_key)
@@ -604,23 +620,33 @@ class ConnectionManager:
         # Combine both sets (Redis + local)
         connection_ids = redis_connection_ids | local_connection_ids
         
-        logger.info(f"Broadcasting inbox notification to {connection_key}")
-        logger.info(f"Redis connection IDs: {redis_connection_ids}")
-        logger.info(f"Local connection IDs: {local_connection_ids}")
-        logger.info(f"Connection IDs: {connection_ids}")
-        logger.info(f"Local connections: {self.local_connections}")
-        logger.info(f"Connection metadata: {self.connection_metadata}")
+        # Verify which connection IDs actually have websockets and clean up stale metadata
+        valid_connection_ids = set()
+        stale_connection_ids = []
         
-        if not connection_ids:
-            # Debug: log all local connections and their metadata
-            all_local = list(self.local_connections.keys())
-            inbox_local = [(cid, self.connection_metadata.get(cid, {})) for cid in all_local 
-                          if self.connection_metadata.get(cid, {}).get("connection_type") == "inbox"]
+        for conn_id in connection_ids:
+            if conn_id in self.local_connections:
+                valid_connection_ids.add(conn_id)
+            else:
+                # Connection ID exists in Redis/local metadata but websocket is missing
+                logger.warning(f"Connection {conn_id} found in Redis/local metadata but websocket missing from local_connections")
+                stale_connection_ids.append(conn_id)
+        
+        # Clean up stale metadata
+        for conn_id in stale_connection_ids:
+            metadata = self._get_connection_metadata(conn_id)
+            if metadata:
+                self._remove_connection_metadata(conn_id, metadata)
+        
+        if not valid_connection_ids:
             logger.info(f"No active inbox connections for inbox:{connection_key}. "
-                       f"Total local connections: {len(all_local)}, "
-                       f"Inbox local connections: {len(inbox_local)}, "
-                       f"Redis connections: {len(redis_connection_ids)}")
+                       f"Redis connection IDs: {redis_connection_ids}, "
+                       f"Local connection IDs: {local_connection_ids}, "
+                       f"Total local connections: {len(self.local_connections)}, "
+                       f"Cleaned up {len(stale_connection_ids)} stale connections")
             return
+        
+        connection_ids = valid_connection_ids
         
         disconnected = []
         connection_count = len(connection_ids)
