@@ -593,6 +593,7 @@ class ConnectionManager:
         """Broadcast inbox notification to user's connections for specific org"""
         connection_key = f"{org_id}:{user_id}"
         
+        
         # Get connections from Redis
         key = self._get_redis_key("inbox", connection_key)
         redis_connection_ids = self._get_connections_from_redis(key)
@@ -602,6 +603,13 @@ class ConnectionManager:
         
         # Combine both sets (Redis + local)
         connection_ids = redis_connection_ids | local_connection_ids
+        
+        logger.info(f"Broadcasting inbox notification to {connection_key}")
+        logger.info(f"Redis connection IDs: {redis_connection_ids}")
+        logger.info(f"Local connection IDs: {local_connection_ids}")
+        logger.info(f"Connection IDs: {connection_ids}")
+        logger.info(f"Local connections: {self.local_connections}")
+        logger.info(f"Connection metadata: {self.connection_metadata}")
         
         if not connection_ids:
             # Debug: log all local connections and their metadata
