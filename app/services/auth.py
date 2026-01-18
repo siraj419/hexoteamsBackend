@@ -63,7 +63,8 @@ class AuthService:
                     "options": {
                         "data": {
                             "display_name": auth_request.display_name
-                        }
+                        },
+                        "email_redirect_to": f"{settings.FRONTEND_URL}/email-verification"
                     }
                 }
             )
@@ -202,8 +203,9 @@ class AuthService:
     def forget_password(self, auth_request: AuthForgetPasswordRequest) -> AuthForgetPasswordResponse:
         try:
             options = {}
-            if auth_request.redirect_to:
-                options["redirect_to"] = auth_request.redirect_to
+            # Use provided redirect_to or default to FRONTEND_URL/reset-password
+            redirect_url = auth_request.redirect_to or f"{settings.FRONTEND_URL}/reset-password"
+            options["redirect_to"] = redirect_url
                 
             supabase.auth.reset_password_for_email(auth_request.email, options)
         except AuthApiError as e:
