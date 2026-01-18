@@ -52,6 +52,7 @@ class ProjectResponse(BaseModel):
     progress_percentage: Optional[int] = 0
     members: List['ProjectMemberSummary'] = []
     favourite_project: bool = False
+    archived: Optional[bool] = False
 
 class AllProjectsResponse(BaseModel):
     member_projects: List[ProjectResponse]
@@ -93,6 +94,13 @@ class ProjectGetPaginatedResponse(BaseModel):
     total: int
     offset: int
     limit: int
+
+class RecentProjectResponse(BaseModel):
+    id: UUID4
+    name: str
+
+class RecentProjectsResponse(BaseModel):
+    projects: List[RecentProjectResponse]
 
 class ProjectGetResponse(ProjectResponse):
     pass
@@ -139,6 +147,7 @@ class ProjectMemberSummary(BaseModel):
     id: UUID4
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    role: Optional[ProjectMemberRole] = None
 
 
 class ProjectAttachmentSummary(BaseModel):
@@ -183,4 +192,8 @@ class ProjectSummaryResponse(BaseModel):
     task_summary: TaskSummary
     team_workload: TeamWorkload
     recent_activities: List[ActivityResponse] = []
+
+
+class ProjectMembersResponse(BaseModel):
+    members: List[ProjectMemberSummary] = []
     

@@ -218,6 +218,7 @@ async def mark_project_messages_read(
             sender_id=str(project_member['user_id'])
         )
     
+    # Cache invalidation is handled in mark_project_messages_read method
     return None
 
 

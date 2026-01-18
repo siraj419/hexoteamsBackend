@@ -394,7 +394,7 @@ def get_my_tasks(
         org_id=UUID4(active_organization['id']),
         task_type=task_type,
         search=search,
-        status=status,
+        task_status=status,
         limit=limit,
         offset=offset,
     )

@@ -10,15 +10,15 @@ from app.services.inbox import InboxService
 from app.utils.redis_cache import cache_service
 from app.utils.notification_pubsub import publish_notification_event
 from app.core import supabase
-from app.tasks.tasks import send_email_task
+from app.core.config import Settings
 from supabase_auth.errors import AuthApiError
 
 logger = logging.getLogger(__name__)
+settings = Settings()
 
 
 class NotificationService:
     CACHE_TTL_PREFERENCES = 600  # 10 minutes
-    CACHE_TTL_EMAIL = 600  # 10 minutes
     
     def __init__(self):
         self.inbox_service = InboxService()
@@ -32,11 +32,10 @@ class NotificationService:
         user_by: UUID4,
         event_type: InboxEventType,
         reference_id: Optional[UUID4] = None,
-        send_email: bool = True,
         send_browser: bool = True,
     ) -> InboxResponse:
         """
-        Send inbox notification with optional email and browser notifications
+        Send inbox notification with optional browser notifications
         
         Args:
             title: Notification title
@@ -46,7 +45,6 @@ class NotificationService:
             user_by: User who triggered the notification
             event_type: Type of event that triggered the notification
             reference_id: Optional reference ID (task_id, project_id, etc.)
-            send_email: Whether to send email notification
             send_browser: Whether to send browser notification
         
         Returns:
@@ -80,14 +78,6 @@ class NotificationService:
             inbox_data=inbox_response,
         )
         
-        if send_email and user_preferences.get('email_notifications', False):
-            self._send_email_notification(
-                user_id=user_id,
-                title=title,
-                message=message,
-                event_type=event_type,
-            )
-        
         return inbox_response
     
     async def notify_organization_invitation(
@@ -102,7 +92,7 @@ class NotificationService:
         title = f"Invitation to {org_name}"
         message = f"{inviter_name} has invited you to join {org_name}"
         
-        return await self.send_inbox_notification(
+        inbox_response = await self.send_inbox_notification(
             title=title,
             message=message,
             user_id=user_id,
@@ -111,6 +101,11 @@ class NotificationService:
             event_type=InboxEventType.ORGANIZATION_INVITATION,
             reference_id=org_id,
         )
+        
+        # Note: Organization invitation emails are already sent by TeamService
+        # when creating invitations, so we skip email here to avoid duplicates
+        
+        return inbox_response
     
     async def notify_task_assigned(
         self,
@@ -126,7 +121,7 @@ class NotificationService:
         title = f"Task Assigned: {task_title}"
         message = f"{assigned_by_name} assigned you a task '{task_title}' in project {project_name}"
         
-        return await self.send_inbox_notification(
+        inbox_response = await self.send_inbox_notification(
             title=title,
             message=message,
             user_id=user_id,
@@ -135,6 +130,33 @@ class NotificationService:
             event_type=InboxEventType.TASK_ASSIGNED,
             reference_id=task_id,
         )
+        
+        # Send email notification
+        try:
+            org_name = self._get_organization_name(org_id)
+            task_url = f"{settings.FRONTEND_URL}/tasks/{task_id}"
+            template_vars = {
+                'task_title': task_title,
+                'project_name': project_name,
+                'assigned_by_name': assigned_by_name,
+                'task_url': task_url,
+                'org_name': org_name,
+                'due_date_line': '',  # Could be fetched if needed
+            }
+            
+            self._send_email_notification(
+                user_id=user_id,
+                org_id=org_id,
+                event_type=InboxEventType.TASK_ASSIGNED,
+                template_name='task_assigned.html',
+                subject=f"Task Assigned: {task_title}",
+                template_vars=template_vars,
+                text_content=f"{assigned_by_name} assigned you a task '{task_title}' in project {project_name}. View task: {task_url}",
+            )
+        except Exception as e:
+            logger.error(f"Failed to send email for task assignment: {e}", exc_info=True)
+        
+        return inbox_response
     
     async def notify_task_unassigned(
         self,
@@ -150,7 +172,7 @@ class NotificationService:
         title = f"Task Unassigned: {task_title}"
         message = f"{unassigned_by_name} unassigned you from task '{task_title}' in project {project_name}"
         
-        return await self.send_inbox_notification(
+        inbox_response = await self.send_inbox_notification(
             title=title,
             message=message,
             user_id=user_id,
@@ -159,6 +181,32 @@ class NotificationService:
             event_type=InboxEventType.TASK_UNASSIGNED,
             reference_id=task_id,
         )
+        
+        # Send email notification
+        try:
+            org_name = self._get_organization_name(org_id)
+            task_url = f"{settings.FRONTEND_URL}/tasks/{task_id}"
+            template_vars = {
+                'task_title': task_title,
+                'project_name': project_name,
+                'unassigned_by_name': unassigned_by_name,
+                'task_url': task_url,
+                'org_name': org_name,
+            }
+            
+            self._send_email_notification(
+                user_id=user_id,
+                org_id=org_id,
+                event_type=InboxEventType.TASK_UNASSIGNED,
+                template_name='task_unassigned.html',
+                subject=f"Task Unassigned: {task_title}",
+                template_vars=template_vars,
+                text_content=f"{unassigned_by_name} unassigned you from task '{task_title}' in project {project_name}.",
+            )
+        except Exception as e:
+            logger.error(f"Failed to send email for task unassignment: {e}", exc_info=True)
+        
+        return inbox_response
     
     async def notify_direct_message(
         self,
@@ -205,6 +253,9 @@ class NotificationService:
             message = f"{completed_by_name} completed task '{task_title}' in project {project_name}"
             
             notifications = []
+            task_url = f"{settings.FRONTEND_URL}/tasks/{task_id}"
+            org_name = self._get_organization_name(org_id)
+            
             for member in response.data:
                 member_user_id = member['user_id']
                 
@@ -221,6 +272,28 @@ class NotificationService:
                     reference_id=task_id,
                 )
                 notifications.append(notification)
+                
+                # Send email notification
+                try:
+                    template_vars = {
+                        'task_title': task_title,
+                        'project_name': project_name,
+                        'completed_by_name': completed_by_name,
+                        'task_url': task_url,
+                        'org_name': org_name,
+                    }
+                    
+                    self._send_email_notification(
+                        user_id=UUID4(member_user_id),
+                        org_id=org_id,
+                        event_type=InboxEventType.TASK_COMPLETED,
+                        template_name='task_completed.html',
+                        subject=f"Task Completed: {task_title}",
+                        template_vars=template_vars,
+                        text_content=f"{completed_by_name} completed task '{task_title}' in project {project_name}. View task: {task_url}",
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send email for task completion to user {member_user_id}: {e}", exc_info=True)
             
             return notifications
             
@@ -244,7 +317,7 @@ class NotificationService:
         title = f"Added to Project: {project_name}"
         message = f"{added_by_name} added you as a member to the project '{project_name}'"
         
-        return await self.send_inbox_notification(
+        inbox_response = await self.send_inbox_notification(
             title=title,
             message=message,
             user_id=user_id,
@@ -253,6 +326,31 @@ class NotificationService:
             event_type=InboxEventType.PROJECT_MEMBER_ADDED,
             reference_id=project_id,
         )
+        
+        # Send email notification
+        try:
+            org_name = self._get_organization_name(org_id)
+            project_url = f"{settings.FRONTEND_URL}/projects/{project_id}"
+            template_vars = {
+                'org_name': org_name,
+                'project_names': project_name,
+                'inviter_name': added_by_name,
+                'frontend_url': settings.FRONTEND_URL,
+            }
+            
+            self._send_email_notification(
+                user_id=user_id,
+                org_id=org_id,
+                event_type=InboxEventType.PROJECT_MEMBER_ADDED,
+                template_name='project_addition.html',
+                subject=f"You've been added to project {project_name}",
+                template_vars=template_vars,
+                text_content=f"{added_by_name} added you as a member to the project '{project_name}'. Visit {project_url} to view the project.",
+            )
+        except Exception as e:
+            logger.error(f"Failed to send email for project member addition: {e}", exc_info=True)
+        
+        return inbox_response
     
     async def _send_browser_notification(
         self,
@@ -280,46 +378,33 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Failed to publish browser notification event: {e}")
     
-    def _send_email_notification(
-        self,
-        user_id: UUID4,
-        title: str,
-        message: str,
-        event_type: InboxEventType,
-    ):
-        """Send email notification"""
+    def _get_user_email(self, user_id: UUID4) -> Optional[str]:
+        """Get user email from profile"""
         try:
-            from app.core.config import Settings
-            settings = Settings()
-            
-            user_email = self._get_user_email(user_id)
-            
-            if not user_email:
-                logger.warning(f"No email found for user {user_id}")
-                return
-            
-            subject = f"[Notification] {title}"
-            
-            template_vars = {
-                'title': title,
-                'message': message,
-                'event_type': event_type.value,
-                'frontend_url': settings.FRONTEND_URL,
-            }
-            
-            send_email_task.delay(
-                to_email=user_email,
-                subject=subject,
-                email_template='inbox_notification.html',
-                body='',
-                text_content=message,
-                token='',
-                template_vars=template_vars
-            )
-            
-            logger.info(f"Email notification queued for user {user_id}")
+            response = supabase.table('profiles').select('email').eq('user_id', str(user_id)).execute()
+            if response.data and len(response.data) > 0:
+                return response.data[0].get('email')
         except Exception as e:
-            logger.error(f"Failed to send email notification: {e}")
+            logger.error(f"Failed to get user email for {user_id}: {e}")
+        return None
+    
+    def _get_organization_name(self, org_id: UUID4) -> str:
+        """Get organization name from org_id with caching"""
+        cache_key = f"organization:name:{org_id}"
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
+        
+        try:
+            response = supabase.table('organizations').select('name').eq('id', str(org_id)).execute()
+            if response.data and len(response.data) > 0:
+                org_name = response.data[0].get('name', '')
+                cache_service.set(cache_key, org_name, ttl=self.CACHE_TTL_PREFERENCES)
+                return org_name
+        except Exception as e:
+            logger.error(f"Failed to get organization name for {org_id}: {e}")
+        
+        return ''
     
     def _get_user_preferences(self, user_id: UUID4) -> Dict[str, Any]:
         """Get user notification preferences from profile"""
@@ -332,20 +417,18 @@ class NotificationService:
         
         try:
             response = supabase.table('profiles').select(
-                'browser_notifications, email_notifications'
+                'browser_notifications'
             ).eq('user_id', str(user_id)).execute()
             
             if not response.data or len(response.data) == 0:
                 default_prefs = {
                     'browser_notifications': True,
-                    'email_notifications': True,
                 }
                 cache_service.set(cache_key, default_prefs, ttl=self.CACHE_TTL_PREFERENCES)
                 return default_prefs
             
             prefs = {
                 'browser_notifications': response.data[0].get('browser_notifications', True),
-                'email_notifications': response.data[0].get('email_notifications', True),
             }
             cache_service.set(cache_key, prefs, ttl=self.CACHE_TTL_PREFERENCES)
             return prefs
@@ -353,30 +436,42 @@ class NotificationService:
             logger.error(f"Failed to get user preferences: {e}")
             default_prefs = {
                 'browser_notifications': True,
-                'email_notifications': True,
             }
             return default_prefs
     
-    def _get_user_email(self, user_id: UUID4) -> Optional[str]:
-        """Get user email from profile"""
-        cache_key = f"user:email:{user_id}"
-        
-        # Check cache first
-        cached = cache_service.get(cache_key)
-        if cached:
-            return cached
+    def _send_email_notification(
+        self,
+        user_id: UUID4,
+        org_id: UUID4,
+        event_type: InboxEventType,
+        template_name: str,
+        subject: str,
+        template_vars: Dict[str, Any],
+        text_content: str,
+    ):
+        """Send email notification via Celery task"""
+        # Skip email for direct messages
+        if event_type == InboxEventType.DIRECT_MESSAGE:
+            return
         
         try:
-            response = supabase.table('profiles').select('email').eq('user_id', str(user_id)).execute()
+            user_email = self._get_user_email(user_id)
+            if not user_email:
+                logger.warning(f"No email found for user {user_id}, skipping email notification")
+                return
             
-            if not response.data or len(response.data) == 0:
-                return None
+            from app.tasks.tasks import send_email_task
             
-            email = response.data[0].get('email')
-            if email:
-                cache_service.set(cache_key, email, ttl=self.CACHE_TTL_EMAIL)
-            return email
+            send_email_task.delay(
+                to_email=user_email,
+                subject=subject,
+                email_template=template_name,
+                body='',
+                text_content=text_content,
+                token='',
+                template_vars=template_vars
+            )
+            logger.info(f"Email notification queued for user {user_id} ({user_email})")
         except Exception as e:
-            logger.error(f"Failed to get user email: {e}")
-            return None
+            logger.error(f"Failed to queue email notification for user {user_id}: {e}", exc_info=True)
 

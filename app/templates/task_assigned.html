@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>You've been added to projects in {{org_name}}</title>
+    <title>Task Assigned: {{task_title}}</title>
     <style>
         * {
             margin: 0;
@@ -24,7 +24,7 @@
             background-color: #262626;
         }
         .email-header {
-            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
             border-radius: 10px;
             padding: 60px 40px;
             text-align: center;
@@ -62,18 +62,18 @@
             color: #ffffff;
             font-weight: 600;
         }
-        .project-details {
+        .task-details {
             background-color: #2d2d2d;
             padding: 32px;
             margin: 40px 0;
         }
-        .project-details p {
+        .task-details p {
             margin: 12px 0;
             color: #e5e5e5;
             font-size: 15px;
         }
-        .project-details strong {
-            color: #a78bfa;
+        .task-details strong {
+            color: #60a5fa;
             font-weight: 600;
         }
         .button-container {
@@ -83,40 +83,24 @@
         .view-button {
             display: inline-block;
             padding: 18px 56px;
-            background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
             color: #ffffff !important;
             text-decoration: none;
             border-radius: 8px;
             font-weight: 600;
             font-size: 17px;
-            box-shadow: 0 4px 16px rgba(139, 92, 246, 0.3);
+            box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
             transition: all 0.3s ease;
             letter-spacing: 0.3px;
         }
         .view-button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(139, 92, 246, 0.4);
+            box-shadow: 0 8px 24px rgba(59, 130, 246, 0.4);
         }
         .divider {
             height: 1px;
             background-color: rgba(255, 255, 255, 0.1);
             margin: 40px 0;
-        }
-        .link-text {
-            font-size: 14px;
-            color: #b3b3b3;
-            margin: 32px 0;
-            word-break: break-all;
-            line-height: 1.6;
-        }
-        .link-text a {
-            color: #7c3aed;
-            text-decoration: none;
-            transition: color 0.2s;
-        }
-        .link-text a:hover {
-            color: #a78bfa;
-            text-decoration: underline;
         }
         .help-notice {
             font-size: 14px;
@@ -138,9 +122,6 @@
             color: #808080;
         }
         @media only screen and (max-width: 600px) {
-            .email-wrapper {
-                padding: 40px 16px;
-            }
             .email-body {
                 padding: 40px 24px;
             }
@@ -157,11 +138,11 @@
                 padding: 16px 40px;
                 font-size: 16px;
             }
-            .project-details {
+            .task-details {
                 padding: 24px;
             }
             .icon {
-                font-size: 56px;
+                font-size: 32px;
             }
         }
     </style>
@@ -169,31 +150,32 @@
 <body>
     <div class="email-container">
         <div class="email-header">
-            <div class="icon">✓</div>
-            <h1>You've been added!</h1>
+            <div class="icon">📋</div>
+            <h1>Task Assigned</h1>
         </div>
         
         <div class="email-body">
-            <h2>Welcome to new projects</h2>
+            <h2>{{task_title}}</h2>
             <p>Hello,</p>
-            <p><strong>{{inviter_name}}</strong> has added you to the following project(s) in <strong>{{org_name}}</strong>:</p>
+            <p><strong>{{assigned_by_name}}</strong> has assigned you a task in <strong>{{project_name}}</strong>.</p>
             
-            <div class="project-details">
-                <p><strong>Organization:</strong> {{org_name}}</p>
-                <p><strong>Project(s):</strong> {{project_names}}</p>
-                <p><strong>Added by:</strong> {{inviter_name}}</p>
+            <div class="task-details">
+                <p><strong>Task:</strong> {{task_title}}</p>
+                <p><strong>Project:</strong> {{project_name}}</p>
+                <p><strong>Assigned by:</strong> {{assigned_by_name}}</p>
+                {{due_date_line}}
             </div>
             
-            <p>You now have access to these projects and can start collaborating with your team. Log in to your account to view and work on these projects.</p>
+            <p>Click the button below to view the task and get started:</p>
             
             <div class="button-container">
-                <a href="{{frontend_url}}" class="view-button">View Projects</a>
+                <a href="{{task_url}}" class="view-button">View Task</a>
             </div>
             
             <div class="divider"></div>
             
             <div class="help-notice">
-                If you have any questions or need assistance, please contact your team administrator.
+                You can view and manage this task in your project dashboard.
             </div>
         </div>
         
@@ -204,3 +186,4 @@
     </div>
 </body>
 </html>
+

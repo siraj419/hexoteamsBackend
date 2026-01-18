@@ -83,6 +83,26 @@ class InboxService:
         reference_id: Optional[UUID4] = None,
     ) -> InboxResponse:
         
+        # Check for duplicate inbox notifications (same event_type, reference_id, user_id, org_id)
+        # created within the last minute to prevent duplicates from concurrent requests
+        if event_type and reference_id:
+            try:
+                one_minute_ago = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                existing = supabase.table('inbox').select('id').eq(
+                    'user_id', str(user_id)
+                ).eq('org_id', str(org_id)).eq('event_type', event_type.value).eq(
+                    'reference_id', str(reference_id)
+                ).gte('created_at', one_minute_ago).execute()
+                
+                if existing.data and len(existing.data) > 0:
+                    logger.info(f"Duplicate inbox notification prevented for user {user_id}, event_type {event_type.value}, reference_id {reference_id}")
+                    # Return the existing inbox notification
+                    existing_id = existing.data[0]['id']
+                    return self.get_inbox(UUID4(existing_id), user_id)
+            except Exception as e:
+                logger.warning(f"Failed to check for duplicate inbox: {e}")
+                # Continue with creation if check fails
+        
         try:
             insert_data = {
                 'title': title,

@@ -17,7 +17,7 @@ class Mailer:
     def _load_template(self, template_name: str):
         try:
             base_path = os.path.join(os.getcwd(), self.settings.EMAIL_TEMPLATES_PATH, template_name)
-            with open(base_path, "r") as f:
+            with open(base_path, "r", encoding="utf-8") as f:
                 template = f.read()
                 
         except FileNotFoundError as e:

@@ -24,6 +24,9 @@ from .projects import (
     ProjectResponse,
     ProjectAddMemberRequest,
     FavouriteProjectsResponse,
+    RecentProjectResponse,
+    RecentProjectsResponse,
+    ProjectMembersResponse,
 )
 
 __all__ = [
@@ -52,4 +55,7 @@ __all__ = [
     "ProjectResponse",
     "ProjectAddMemberRequest",
     "FavouriteProjectsResponse",
+    "RecentProjectResponse",
+    "RecentProjectsResponse",
+    "ProjectMembersResponse",
 ]

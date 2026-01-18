@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     SUPABASE_KEY: str
     
     # Frontend URL (for email redirections)
-    FRONTEND_URL: str = Field('http://localhost:3000', description="Frontend application URL used in email redirections")
+    FRONTEND_URL: str = Field('http://localhost:8080', description="Frontend application URL used in email redirections")
     
     # Supabase Admin (for creating users)
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(default=None, description="Supabase Service Role Key for admin operations")

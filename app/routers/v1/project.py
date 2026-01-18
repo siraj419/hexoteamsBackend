@@ -2,8 +2,12 @@ from fastapi import APIRouter, Depends, Query, File, UploadFile, status, HTTPExc
 from pydantic import UUID4
 from typing import List, Optional
 from datetime import date
+import httpx
+import time
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 from app.schemas.projects import (
     ProjectCreateRequest,
@@ -23,6 +27,8 @@ from app.schemas.projects import (
     ProjectSummaryResponse,
     ProjectAddMemberRequest,
     FavouriteProjectsResponse,
+    RecentProjectsResponse,
+    ProjectMembersResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
 
@@ -58,13 +64,36 @@ def get_project_member_for_attachments(project_id: UUID4, user: any = Depends(ge
     from app.core import supabase
     from supabase_auth.errors import AuthApiError
     
-    try:
-        response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
-    except AuthApiError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get project member: {e}"
-        )
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
+            break
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                logger.warning(f"Network error getting project member (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Failed to get project member after {max_retries} attempts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service temporarily unavailable. Please try again in a moment."
+                )
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get project member: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error getting project member: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get project member: {str(e)}"
+            )
     
     if not response.data or len(response.data) == 0:
         raise HTTPException(
@@ -82,13 +111,36 @@ def get_project_owner_or_admin(project_id: UUID4, user: any = Depends(get_curren
     from app.core import supabase
     from supabase_auth.errors import AuthApiError
     
-    try:
-        response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
-    except AuthApiError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to check project membership: {e}"
-        )
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
+            break
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                logger.warning(f"Network error checking project membership (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Failed to check project membership after {max_retries} attempts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service temporarily unavailable. Please try again in a moment."
+                )
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check project membership: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error checking project membership: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check project membership: {str(e)}"
+            )
     
     if not response.data or len(response.data) == 0:
         raise HTTPException(
@@ -116,40 +168,83 @@ def get_project_access(project_id: UUID4, user: any = Depends(get_current_user),
     from app.core import supabase
     from supabase_auth.errors import AuthApiError
     
+    max_retries = 3
+    retry_delay = 0.5
+    
     # Check if user is a project member
-    try:
-        member_response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
-        if member_response.data and len(member_response.data) > 0:
-            return {
-                'has_access': True,
-                'is_member': True,
-                'member_data': member_response.data[0]
-            }
-    except AuthApiError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to check project membership: {e}"
-        )
+    for attempt in range(max_retries):
+        try:
+            member_response = supabase.table('project_members').select('*').eq('project_id', str(project_id)).eq('user_id', user.id).execute()
+            if member_response.data and len(member_response.data) > 0:
+                return {
+                    'has_access': True,
+                    'is_member': True,
+                    'member_data': member_response.data[0]
+                }
+            break
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                logger.warning(f"Network error checking project membership (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Failed to check project membership after {max_retries} attempts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service temporarily unavailable. Please try again in a moment."
+                )
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check project membership: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error checking project membership: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check project membership: {str(e)}"
+            )
     
     # Check if user is org admin/owner
     org_member_role = active_organization.get('member_role')
     if org_member_role in [OrganizationMemberRole.ADMIN.value, OrganizationMemberRole.OWNER.value]:
         # Verify project belongs to the organization
-        try:
-            project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
-            if project_response.data and len(project_response.data) > 0:
-                project_org_id = project_response.data[0]['org_id']
-                if str(project_org_id) == str(active_organization['id']):
-                    return {
-                        'has_access': True,
-                        'is_member': False,
-                        'member_data': None
-                    }
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to verify project organization: {e}"
-            )
+        for attempt in range(max_retries):
+            try:
+                project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
+                if project_response.data and len(project_response.data) > 0:
+                    project_org_id = project_response.data[0]['org_id']
+                    if str(project_org_id) == str(active_organization['id']):
+                        return {
+                            'has_access': True,
+                            'is_member': False,
+                            'member_data': None
+                        }
+                break
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"Network error verifying project organization (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Failed to verify project organization after {max_retries} attempts: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Service temporarily unavailable. Please try again in a moment."
+                    )
+            except AuthApiError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to verify project organization: {e}"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error verifying project organization: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to verify project organization: {str(e)}"
+                )
     
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -160,10 +255,28 @@ def _get_user_timezone(user_id: UUID4) -> str:
     from app.core import supabase
     from supabase_auth.errors import AuthApiError
     
-    try:
-        response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
-    except AuthApiError as e:
-        return 'UTC'
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
+            break
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                logger.warning(f"Network error getting user timezone (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.warning(f"Failed to get user timezone after {max_retries} attempts: {e}. Using UTC as default.")
+                return 'UTC'
+        except AuthApiError as e:
+            logger.warning(f"Auth error getting user timezone: {e}. Using UTC as default.")
+            return 'UTC'
+        except Exception as e:
+            logger.warning(f"Unexpected error getting user timezone: {e}. Using UTC as default.")
+            return 'UTC'
     
     if not response.data or len(response.data) == 0:
         return 'UTC'
@@ -227,6 +340,20 @@ def get_favourite_projects(
         org_id=active_organization['id'],
         limit=limit,
         offset=offset
+    )
+
+@router.get("/recent", response_model=RecentProjectsResponse, status_code=status.HTTP_200_OK)
+def get_recent_projects(
+    active_organization: any = Depends(get_active_organization),
+):
+    """
+        Get 5 most recent projects (by created_at) that the user is a member of.
+        Returns only id and name for sidebar display.
+    """
+    project_service = ProjectService()
+    return project_service.get_recent_projects(
+        org_id=active_organization['id'],
+        user_id=active_organization['member_user_id'],
     )
 
 @router.get("/non-member", response_model=NonMemberProjectsResponse, status_code=status.HTTP_200_OK)
@@ -352,6 +479,20 @@ def get_project(
             pass
     return project_service.get_project(project_id, user_id=user_id)
 
+@router.get("/{project_id}/members", response_model=ProjectMembersResponse, status_code=status.HTTP_200_OK)
+def get_project_members(
+    project_id: UUID4,
+    member: any = Depends(get_project_member_for_attachments),
+):
+    """
+    Get all members of a project.
+    Returns a list of ProjectMemberSummary with id, display_name, and avatar_url.
+    Requires: Project member
+    """
+    project_service = ProjectService()
+    members = project_service.get_project_members(project_id)
+    return ProjectMembersResponse(members=members)
+
 @router.post("/{project_id}/members", response_model=ProjectMember, status_code=status.HTTP_201_CREATED)
 def add_project_member(
     project_id: UUID4,
@@ -371,6 +512,33 @@ def add_project_member(
         role=member_request.role,
         added_by_id=UUID4(current_user.id),
     )
+
+@router.delete("/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_project_member(
+    project_id: UUID4,
+    user_id: UUID4,
+    owner_or_admin: any = Depends(get_project_owner_or_admin),
+    current_user: any = Depends(get_current_user),
+):
+    """
+        Remove a member from a project.
+        Only project owners and admins can remove members.
+        Cannot remove the last owner of the project.
+    """
+    # Prevent removing yourself
+    if str(user_id) == str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove yourself from the project"
+        )
+    
+    project_service = ProjectService()
+    project_service.remove_project_member(
+        project_id=project_id,
+        user_id=user_id,
+        removed_by_id=UUID4(current_user.id),
+    )
+    return None
 
 @router.patch("/{project_id}", response_model=ProjectUpdateResponse, status_code=status.HTTP_200_OK)
 def update_project_optimized(

@@ -254,7 +254,7 @@ class TaskService:
     ) -> bool:
         # Check if comment exists and belongs to user
         try:
-            response = supabase.table('task_comments').select('id, file_ids').eq('id', str(comment_id)).eq('created_by', str(user_id)).execute()
+            response = supabase.table('task_comments').select('id').eq('id', str(comment_id)).eq('created_by', str(user_id)).execute()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -267,13 +267,14 @@ class TaskService:
                 detail="Comment not found or you don't have permission to delete it"
             )
         
-        # Delete associated attachments
+        # Delete all associated attachments for this comment
         try:
-            attachments = self.attachment_service.get_attachments(AttachmentType.COMMENT, comment_id)
-            for attachment in attachments.attachments:
-                self.attachment_service.delete_attachment(attachment.id)
-        except Exception:
-            pass  # Continue even if attachment deletion fails
+            self.attachment_service.delete_all(comment_id, AttachmentType.COMMENT)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to delete attachments for comment {comment_id}: {e}")
+            # Continue with comment deletion even if attachment deletion fails
         
         # Delete the comment
         try:
@@ -978,7 +979,7 @@ class TaskService:
         org_id: UUID4,
         task_type: str = "all",
         search: Optional[str] = None,
-        status: Optional[TaskStatus] = None,
+        task_status: Optional[TaskStatus] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ):
@@ -1030,9 +1031,9 @@ class TaskService:
             assigned_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('assignee_id', str(user_id))
             created_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('created_by', str(user_id))
             
-            if status:
-                assigned_query = assigned_query.eq('status', status.value)
-                created_query = created_query.eq('status', status.value)
+            if task_status:
+                assigned_query = assigned_query.eq('status', task_status.value)
+                created_query = created_query.eq('status', task_status.value)
             if search:
                 assigned_query = assigned_query.ilike('title', f'%{search}%')
                 created_query = created_query.ilike('title', f'%{search}%')
@@ -1117,8 +1118,8 @@ class TaskService:
             )
         
         # For assigned or created, continue with single query
-        if status:
-            query = query.eq('status', status.value)
+        if task_status:
+            query = query.eq('status', task_status.value)
         if search:
             query = query.ilike('title', f'%{search}%')
         
@@ -1324,7 +1325,7 @@ class TaskService:
         Highly optimized: fetches all data in minimal queries and builds tree in memory.
         """
         
-        query = supabase.table('task_comments').select('id, content, created_by, created_at', count='exact').eq('task_id', str(task_id)).is_('parent_id', 'null')
+        query = supabase.table('task_comments').select('id, content, created_by, created_at', count='exact').eq('task_id', str(task_id)).is_('parent_id', 'null').order('created_at', desc=True)
         
         limit, offset, query = apply_pagination(query, limit, offset)
         
@@ -1463,8 +1464,10 @@ class TaskService:
             user_info = self._get_user_info(comment_data['created_by'])
             user_info_cache[user_id_str] = user_info
         
-        # Get replies for this comment
+        # Get replies for this comment and sort chronologically
         replies_data = comments_by_parent.get(comment_id, [])
+        # Sort replies by created_at to ensure chronological order
+        replies_data = sorted(replies_data, key=lambda x: x.get('created_at', ''))
         replies = []
         for reply_data in replies_data:
             replies.append(

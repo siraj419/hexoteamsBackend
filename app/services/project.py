@@ -25,6 +25,8 @@ from app.schemas.projects import (
     UserWorkload,
     ProjectResponse,
     FavouriteProjectsResponse,
+    RecentProjectResponse,
+    RecentProjectsResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
 from app.services.files import FilesService
@@ -169,8 +171,8 @@ class ProjectService:
     def create_project( 
         self,
         project_request: ProjectCreateRequest,
-        org_id: UUID4,
-        user_id: UUID4,
+        org_id: str,
+        user_id: str,
     ) -> ProjectCreateResponse:
         
         # check if the project name is already taken
@@ -179,7 +181,7 @@ class ProjectService:
                 supabase.table('projects')
                 .select('*')
                 .ilike('name', f"%{project_request.name}%")
-                .eq('org_id', org_id)
+                .eq('org_id', str(org_id))
                 .execute()
             )
         except Exception as e:
@@ -204,15 +206,15 @@ class ProjectService:
         try:
             response = supabase.table('projects').insert({
                 'name': project_request.name,
-                'org_id': org_id,
+                'org_id': str(org_id),
                 'avatar_color': project_request.avatar_color,
                 'avatar_icon': project_request.avatar_icon,
-                'avatar_file_id': project_request.avatar_file_id,
+                'avatar_file_id': str(project_request.avatar_file_id) if project_request.avatar_file_id else None,
                 'start_date': project_request.start_date.isoformat(),
                 'end_date': project_request.end_date.isoformat() if project_request.end_date else None,
                 'view': project_request.view.value if project_request.view else ProjectTasksView.LIST.value,
                 'progress_percentage': 0,
-                'created_by': user_id,
+                'created_by': str(user_id),
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).execute()
@@ -508,6 +510,7 @@ class ProjectService:
             progress_percentage=response.data[0].get('progress_percentage', 0),
             members=members,
             favourite_project=self._is_favourite_project(project_id, user_id),
+            archived=response.data[0].get('archived', False),
         )
     
     def get_project_summary(
@@ -559,6 +562,7 @@ class ProjectService:
                             progress_percentage=project_data.get('progress_percentage', 0),
                             members=cached_summary.get('members', []),
                             favourite_project=self._is_favourite_project(UUID4(project_data['id']), user_id),
+                            archived=project_data.get('archived', False),
                         )
                         cached_summary['project'] = project_info.model_dump(mode='json')
                 else:
@@ -612,17 +616,20 @@ class ProjectService:
                 progress_percentage=project_data.get('progress_percentage', 0),
                 members=[],  # Will be populated below
                 favourite_project=self._is_favourite_project(project_id, user_id),
+                archived=project_data.get('archived', False),
             )
             
             # 1. Get project members with user info (handle duplicates)
             members_response = supabase.table('project_members').select(
-                'user_id'
+                'user_id, role'
             ).eq('project_id', project_id_str).execute()
             
             members = []
             seen_user_ids = set()
             if members_response.data:
-                user_ids = [UUID4(member['user_id']) for member in members_response.data]
+                # Create a map of user_id to role
+                user_role_map = {UUID4(member['user_id']): member.get('role') for member in members_response.data}
+                user_ids = list(user_role_map.keys())
                 
                 # Collect all unique user IDs for batch fetching
                 unique_user_ids = []
@@ -645,10 +652,12 @@ class ProjectService:
                         'display_name': None,
                         'avatar_url': None
                     }
+                    role = user_role_map.get(user_id)
                     members.append(ProjectMemberSummary(
                         id=user_id,
                         display_name=user_info.get('display_name'),
-                        avatar_url=user_info.get('avatar_url')
+                        avatar_url=user_info.get('avatar_url'),
+                        role=ProjectMemberRole(role) if role else None
                     ))
             
             # Update project_info with members
@@ -1009,29 +1018,38 @@ class ProjectService:
     def _get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
         """
         Get project members with user info using Redis caching.
-        Returns a list of ProjectMemberSummary with id, display_name, and avatar_url.
+        Returns a list of ProjectMemberSummary with id, display_name, avatar_url, and role.
         """
         project_id_str = str(project_id)
         members = []
         
         try:
             members_response = supabase.table('project_members').select(
-                'user_id'
+                'user_id, role'
             ).eq('project_id', project_id_str).execute()
             
             if members_response.data:
-                user_ids = [UUID4(member['user_id']) for member in members_response.data]
-                for user_id in user_ids:
+                for member_data in members_response.data:
+                    user_id = UUID4(member_data['user_id'])
+                    role = member_data.get('role')
                     user_info = self._get_user_info_with_cache(user_id)
                     members.append(ProjectMemberSummary(
                         id=user_id,
                         display_name=user_info.get('display_name'),
-                        avatar_url=user_info.get('avatar_url')
+                        avatar_url=user_info.get('avatar_url'),
+                        role=ProjectMemberRole(role) if role else None
                     ))
         except Exception as e:
             logger.error(f"Error getting project members for project {project_id_str}: {str(e)}")
         
         return members
+    
+    def get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
+        """
+        Get project members with user info.
+        Returns a list of ProjectMemberSummary with id, display_name, and avatar_url.
+        """
+        return self._get_project_members(project_id)
     
     def delete_project(
         self,
@@ -1309,6 +1327,29 @@ class ProjectService:
         skip_notification: bool = False,
     ) -> ProjectMember:
         logger.info(f"Adding project member {user_id} to project {project_id} with role {role} and added_by_id {added_by_id} and skip_notification {skip_notification}")
+        
+        # Check if user is already a member to prevent duplicates
+        try:
+            existing = supabase.table('project_members').select('id, role').eq(
+                'project_id', str(project_id)
+            ).eq('user_id', str(user_id)).execute()
+            
+            if existing.data and len(existing.data) > 0:
+                logger.info(f"User {user_id} is already a member of project {project_id}, skipping duplicate addition")
+                # Return existing member data
+                existing_member = existing.data[0]
+                return ProjectMember(
+                    id=UUID4(existing_member['id']),
+                    project_id=project_id,
+                    user_id=user_id,
+                    role=ProjectMemberRole(existing_member['role']),
+                    created_at=datetime.fromisoformat(existing_member['created_at'].replace('Z', '+00:00')),
+                    updated_at=datetime.fromisoformat(existing_member['updated_at'].replace('Z', '+00:00'))
+                )
+        except Exception as e:
+            logger.warning(f"Failed to check for existing project member: {e}")
+            # Continue with insert if check fails
+        
         try:
             role_value = role.value if isinstance(role, ProjectMemberRole) else role
             response = supabase.table('project_members').insert({
@@ -1319,6 +1360,27 @@ class ProjectService:
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).execute()
         except AuthApiError as e:
+            # Check if error is due to unique constraint violation (duplicate)
+            if hasattr(e, 'code') and e.code == '23505':
+                # Duplicate key error - fetch and return existing record
+                try:
+                    existing = supabase.table('project_members').select('*').eq(
+                        'project_id', str(project_id)
+                    ).eq('user_id', str(user_id)).execute()
+                    if existing.data and len(existing.data) > 0:
+                        logger.info(f"Duplicate project member prevented, returning existing member")
+                        existing_member = existing.data[0]
+                        return ProjectMember(
+                            id=UUID4(existing_member['id']),
+                            project_id=project_id,
+                            user_id=user_id,
+                            role=ProjectMemberRole(existing_member['role']),
+                            created_at=datetime.fromisoformat(existing_member['created_at'].replace('Z', '+00:00')),
+                            updated_at=datetime.fromisoformat(existing_member['updated_at'].replace('Z', '+00:00'))
+                        )
+                except:
+                    pass
+            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to add project member: {e}"
@@ -1431,6 +1493,114 @@ class ProjectService:
         # Add the member
         return self._add_project_member(project_id, user_id, role, added_by_id=added_by_id)
     
+    def remove_project_member(
+        self,
+        project_id: UUID4,
+        user_id: UUID4,
+        removed_by_id: Optional[UUID4] = None,
+    ) -> None:
+        """
+        Remove a member from a project.
+        
+        Args:
+            project_id: The project ID
+            user_id: The user ID to remove
+            removed_by_id: The user ID who is removing the member (for activity logging)
+        
+        Raises:
+            HTTPException: If member not found, is the last owner, or removal fails
+        """
+        project_id_str = str(project_id)
+        user_id_str = str(user_id)
+        
+        # Check if member exists
+        try:
+            member_response = supabase.table('project_members').select('*').eq(
+                'project_id', project_id_str
+            ).eq('user_id', user_id_str).execute()
+            
+            if not member_response.data or len(member_response.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User is not a member of this project"
+                )
+            
+            member = member_response.data[0]
+            member_role = member.get('role')
+            
+            # Prevent removing the last owner
+            if member_role == ProjectMemberRole.OWNER.value:
+                owners_response = supabase.table('project_members').select('id').eq(
+                    'project_id', project_id_str
+                ).eq('role', ProjectMemberRole.OWNER.value).execute()
+                
+                if owners_response.data and len(owners_response.data) <= 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cannot remove the last owner of the project"
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to check project membership: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to check project membership: {e}"
+            )
+        
+        # Remove the member
+        try:
+            delete_response = supabase.table('project_members').delete().eq(
+                'project_id', project_id_str
+            ).eq('user_id', user_id_str).execute()
+            
+            if not delete_response.data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Member not found or already removed"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to remove project member: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to remove project member: {e}"
+            )
+        
+        # Invalidate project summary cache
+        try:
+            cache = ProjectSummaryCache()
+            cache.invalidate(project_id)
+        except Exception as e:
+            logger.warning(f"Failed to invalidate project summary cache: {e}")
+        
+        # Log activity if removed_by_id is provided
+        if removed_by_id:
+            try:
+                # Get project name for activity
+                project_response = supabase.table('projects').select('name').eq('id', project_id_str).execute()
+                project_name = project_response.data[0]['name'] if project_response.data else "Project"
+                
+                # Get removed user's name
+                user_cache = UserCache()
+                removed_user = user_cache.get(user_id)
+                removed_user_name = removed_user.display_name if removed_user else "User"
+                
+                # Get remover's name
+                remover = user_cache.get(removed_by_id)
+                remover_name = remover.display_name if remover else "User"
+                
+                self.activity_service.create_activity(
+                    entity_type=ActivityType.PROJECT,
+                    entity_id=project_id,
+                    activity_type="project_member_removed",
+                    user_id=removed_by_id,
+                    description=f"{remover_name} removed {removed_user_name} from project {project_name}",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log project member removal activity: {e}")
+    
     def _apply_pagination(
         self,
         query: Any,
@@ -1519,6 +1689,51 @@ class ProjectService:
             total=total,
             offset=offset,
             limit=limit,
+        )
+    
+    def get_recent_projects(
+        self,
+        org_id: UUID4,
+        user_id: UUID4,
+    ) -> RecentProjectsResponse:
+        """
+        Get 5 most recent projects (by created_at) that the user is a member of.
+        Returns only id and name for sidebar display.
+        """
+        try:
+            # Get member projects using RPC function
+            query = supabase.rpc('get_member_projects', {
+                'user_id': str(user_id),
+                'org_id': str(org_id),
+            })
+            
+            # Filter out archived projects
+            query = query.eq('archived', False)
+            
+            # Order by created_at descending (most recent first)
+            query = query.order('created_at', desc=True)
+            
+            # Limit to 5
+            query = query.limit(5)
+            
+            response = query.execute()
+            print("response", response)
+            
+            projects = []
+            for project in response.data:
+                projects.append(
+                    RecentProjectResponse(
+                        id=UUID4(project['id']),
+                        name=project['name'],
+                    )
+                )
+            
+            return RecentProjectsResponse(projects=projects)
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get recent projects: {e}"
         )
     
     def _get_non_member_projects_count(

@@ -2,9 +2,14 @@ from fastapi import Request, HTTPException, status, Depends, Query
 from supabase_auth.errors import AuthApiError
 from pydantic import UUID4
 from typing import Any
+import time
+import logging
+import httpx
 
 from app.core import supabase
 from app.schemas.organizations import OrganizationMemberRole
+
+logger = logging.getLogger(__name__)
 
 def get_current_user(request: Request) -> any:
     
@@ -34,20 +39,43 @@ def get_current_user(request: Request) -> any:
     return user_response.user
 
 def get_active_organization(user: any = Depends(get_current_user)) -> any:
-    try:
-        response_organization_member = (
-            supabase
-                .table('organization_members')
-                .select('role, organizations(id, name, description, avatar_color, avatar_icon, avatar_file_id)')
-                .eq('user_id', user.id)
-                .eq('active', True)
-                .execute()
-        )
-    except AuthApiError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get active organization: {e}"
-        )
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            response_organization_member = (
+                supabase
+                    .table('organization_members')
+                    .select('role, organizations(id, name, description, avatar_color, avatar_icon, avatar_file_id)')
+                    .eq('user_id', user.id)
+                    .eq('active', True)
+                    .execute()
+            )
+            break  # Success, exit retry loop
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"Network error getting active organization (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Failed to get active organization after {max_retries} attempts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service temporarily unavailable. Please try again in a moment."
+                )
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get active organization: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error getting active organization: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get active organization: {str(e)}"
+            )
     
     if not response_organization_member.data or len(response_organization_member.data) == 0:
         raise HTTPException(
@@ -56,24 +84,47 @@ def get_active_organization(user: any = Depends(get_current_user)) -> any:
         )
     
     return {
-        'id': response_organization_member.data[0]['organizations']['id'],
+        'id': str(response_organization_member.data[0]['organizations']['id']),
         'name': response_organization_member.data[0]['organizations']['name'],
         'description': response_organization_member.data[0]['organizations']['description'],
         'avatar_color': response_organization_member.data[0]['organizations']['avatar_color'],
         'avatar_icon': response_organization_member.data[0]['organizations']['avatar_icon'],
-        'avatar_file_id': response_organization_member.data[0]['organizations']['avatar_file_id'],
-        'member_user_id': user.id,
+        'avatar_file_id': str(response_organization_member.data[0]['organizations']['avatar_file_id']),
+        'member_user_id': str(user.id),
         'member_role': response_organization_member.data[0]['role'],
     }
 
 def get_organization_member(organization_id: UUID4, user: any= Depends(get_current_user)) -> any:
-    try:
-        response = supabase.table('organization_members').select('*').eq('org_id', organization_id).eq('user_id', user.id).execute()
-    except AuthApiError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get organization member: {e}"
-        )
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            response = supabase.table('organization_members').select('*').eq('org_id', organization_id).eq('user_id', user.id).execute()
+            break
+        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                logger.warning(f"Network error getting organization member (attempt {attempt + 1}/{max_retries}): {e}. Retrying...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Failed to get organization member after {max_retries} attempts: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service temporarily unavailable. Please try again in a moment."
+                )
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get organization member: {e}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error getting organization member: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get organization member: {str(e)}"
+            )
     
     if not response.data or len(response.data) == 0:
         raise HTTPException(

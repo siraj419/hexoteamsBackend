@@ -87,6 +87,18 @@ class TeamService:
         org_info = self._get_organization_info(org_id)
         inviter_info = self._get_user_info(invited_by)
         
+        # Invalidate any previous invitations that match exactly:
+        # - Same email list (all emails in this invite_request)
+        # - Same project list (all projects in this invite_request)
+        # - Same organization
+        # This ensures old invitation tokens are invalidated only when the exact same invitation is re-sent
+        # Do this once before processing emails to avoid duplicate invalidations
+        self._invalidate_existing_invitations(
+            org_id, 
+            invite_request.user_emails, 
+            invite_request.project_ids if invite_request.project_ids else []
+        )
+        
         # Process each email
         for email in invite_request.user_emails:
             try:
@@ -155,8 +167,8 @@ class TeamService:
         # Validate token and get invitation
         invitation = self._validate_invitation_token(accept_request.token)
         
-        # Check if already accepted
-        if invitation.get('accepted_at'):
+        # Status check is already done in _validate_invitation_token, but keep this for backward compatibility
+        if invitation.get('accepted_at') or invitation.get('status') == 'accepted':
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invitation already accepted"
@@ -172,6 +184,31 @@ class TeamService:
                     detail="Email does not match invitation"
                 )
             
+            # Mark invitation as accepted IMMEDIATELY to prevent concurrent processing
+            # This must happen before adding user to org/projects to prevent race conditions
+            invitation_id = UUID4(invitation['id'])
+            try:
+                # Try to update status atomically - if it fails, invitation was already accepted
+                update_response = supabase.table('invitations').update({
+                    'status': 'accepted',
+                    'accepted_at': datetime.now(timezone.utc).isoformat(),
+                }).eq('id', str(invitation_id)).eq('status', 'pending').execute()
+                
+                # If no rows were updated, invitation was already accepted by another request
+                if not update_response.data or len(update_response.data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invitation already accepted by another request"
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to mark invitation as accepted: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to process invitation"
+                )
+            
             # Add user to organization and projects
             org_id = UUID4(invitation['org_id'])
             project_ids = [UUID4(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else []
@@ -183,9 +220,6 @@ class TeamService:
                 invitation.get('as_admin', False),
                 inviter_id=inviter_id
             )
-            
-            # Mark invitation as accepted
-            self._mark_invitation_accepted(UUID4(invitation['id']))
             
             # Set the invited organization as active for the user
             from app.services.organization import OrganizationService
@@ -230,7 +264,7 @@ class TeamService:
                 return cached
         
         query = supabase.table('invitations').select(
-            'id, email, token, invited_by, accepted_at, expires_at, created_at, added_project_ids, as_admin',
+            'id, email, token, invited_by, accepted_at, expires_at, created_at, added_project_ids, as_admin, status',
             count='exact'
         ).eq('org_id', str(org_id)).order('created_at', desc=True)
         
@@ -252,6 +286,7 @@ class TeamService:
         
         # Apply search filter before processing (for array email column)
         filtered_data = response.data if response.data else []
+        
         if search:
             filtered_data = [
                 inv for inv in filtered_data
@@ -288,18 +323,21 @@ class TeamService:
         
         invitations = []
         for inv in filtered_data:
+            # Use status from database if available, otherwise calculate based on accepted_at and expiration
+            status_str = inv.get('status', 'pending')
             
-            expires_at = datetime.fromisoformat(inv['expires_at'].replace('Z', '+00:00'))
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if inv.get('accepted_at'):
-                status_str = "accepted"
-            elif inv.get('invalidated_at'):
-                status_str = "invalidated"
-            elif expires_at < datetime.now(timezone.utc):
-                status_str = "expired"
-            else:
-                status_str = "pending"
+            # If status is not set in DB, calculate it (for backward compatibility)
+            if not status_str or status_str == 'pending':
+                expires_at = datetime.fromisoformat(inv['expires_at'].replace('Z', '+00:00'))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                
+                if inv.get('accepted_at'):
+                    status_str = "accepted"
+                elif expires_at < datetime.now(timezone.utc):
+                    status_str = "expired"
+                else:
+                    status_str = "pending"
             
             invited_projects = []
             if inv.get('added_project_ids'):
@@ -344,6 +382,70 @@ class TeamService:
         
         return result
     
+    def _regenerate_avatar_urls_for_cached_members(self, cached_members: List[Dict[str, Any]]) -> List[TeamMembersResponse]:
+        """Regenerate avatar URLs for cached members since presigned URLs expire."""
+        members_list = []
+        for member_dict in cached_members:
+            try:
+                if not member_dict.get('email'):
+                    logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
+                    continue
+                
+                # Regenerate avatar URL - use _get_user_info to ensure we get fresh data
+                user_id_str = str(member_dict.get('id', ''))
+                if user_id_str:
+                    try:
+                        user_info = self._get_user_info(UUID4(user_id_str))
+                        member_dict['avatar_url'] = user_info.get('avatar_url')
+                        logger.debug(f"Regenerated avatar URL for cached member {user_id_str}: {member_dict.get('avatar_url', 'None')[:50] if member_dict.get('avatar_url') else 'None'}...")
+                    except Exception as e:
+                        logger.warning(f"Failed to get user info for cached member {user_id_str}: {e}")
+                        member_dict['avatar_url'] = None
+                else:
+                    member_dict['avatar_url'] = None
+                
+                # Normalize role to string
+                if 'role' in member_dict:
+                    role_value = member_dict['role']
+                    if isinstance(role_value, TeamUserRole):
+                        member_dict['role'] = role_value.value
+                    elif not isinstance(role_value, str):
+                        member_dict['role'] = 'member'
+                
+                members_list.append(TeamMembersResponse(**member_dict))
+            except Exception as e:
+                logger.warning(f"Failed to reconstruct cached member {member_dict.get('id')}: {e}")
+                return []  # Return empty to force DB fetch
+        
+        return members_list
+    
+    def _build_team_member_from_data(self, member_data: Dict[str, Any], user_info: Dict[str, Any], search: Optional[str] = None) -> Optional[TeamMembersResponse]:
+        """Build a TeamMembersResponse from member and user data, applying search filter if provided."""
+        email = user_info.get('email')
+        if not email:
+            logger.warning(f"User {user_info.get('id')} has no email, skipping")
+            return None
+        
+        # Apply search filter if provided
+        if search:
+            search_lower = search.lower()
+            display_name = user_info.get('display_name', '').lower()
+            email_lower = email.lower()
+            if search_lower not in display_name and search_lower not in email_lower:
+                return None
+        
+        # Normalize role
+        role_value = member_data['role']
+        role_enum = role_value if isinstance(role_value, TeamUserRole) else TeamUserRole(str(role_value))
+        
+        return TeamMembersResponse(
+            id=user_info['id'],
+            display_name=user_info.get('display_name', ''),
+            email=email,
+            avatar_url=user_info.get('avatar_url'),
+            role=role_enum,
+        )
+    
     def get_team_members(
         self,
         org_id: UUID4,
@@ -355,38 +457,12 @@ class TeamService:
         """
         Get all members of an organization with pagination and filters.
         """
-        # Skip caching if search is provided
+        # Try to get from cache if no search
         if not search:
             cache_key = f"team:members:{org_id}:{role}:{limit}:{offset}"
             cached = cache_service.get(cache_key)
             if cached and cached.get('members'):
-                # Reconstruct Pydantic models from cached dict
-                # The cached data should have role as a string (from model_dump(mode='json'))
-                # Pydantic will automatically convert it to TeamUserRole enum
-                members_list = []
-                for member_dict in cached.get('members', []):
-                    try:
-                        # Email should always be in cached data now, but handle edge case
-                        if not member_dict.get('email'):
-                            logger.warning(f"Cached member {member_dict.get('id')} has no email, skipping")
-                            continue
-                        
-                        # Ensure role is a string (not Enum class or instance)
-                        if 'role' in member_dict:
-                            role_value = member_dict['role']
-                            # If it's already a string, keep it; if it's an Enum, get its value
-                            if isinstance(role_value, TeamUserRole):
-                                member_dict['role'] = role_value.value
-                            elif not isinstance(role_value, str):
-                                # If it's something else (like Enum class), skip or use default
-                                member_dict['role'] = 'member'  # default fallback
-                        members_list.append(TeamMembersResponse(**member_dict))
-                    except Exception as e:
-                        logger.warning(f"Failed to reconstruct cached member {member_dict.get('id')}: {e}, will fetch from DB")
-                        # If cached data is invalid, fall through to fetch from database
-                        break
-                
-                # Only return cached data if we successfully reconstructed all members
+                members_list = self._regenerate_avatar_urls_for_cached_members(cached.get('members', []))
                 if members_list and len(members_list) == len(cached.get('members', [])):
                     return {
                         'members': members_list,
@@ -394,25 +470,24 @@ class TeamService:
                         'limit': cached.get('limit'),
                         'offset': cached.get('offset')
                     }
-                # If cached data is invalid or incomplete, fall through to fetch from database
         
-        query = supabase.table('organization_members').select(
-            'user_id, role, created_at',
-            count='exact'
-        ).eq('org_id', str(org_id)).order('created_at', desc=True)
-        
-        if role:
-            query = query.eq('role', role.value)
-        
-        # For search, we need to fetch user info first, so fetch more results to account for filtering
-        if search:
-            # Fetch up to 10x the limit or 500, whichever is smaller, to account for filtering
-            fetch_limit = min((limit or 20) * 10, 500)
-            query = query.limit(fetch_limit)
-        else:
-            limit, offset, query = apply_pagination(query, limit, offset)
-        
+        # Fetch from database
         try:
+            query = supabase.table('organization_members').select(
+                'user_id, role, created_at',
+                count='exact'
+            ).eq('org_id', str(org_id)).order('created_at', desc=True)
+            
+            if role:
+                query = query.eq('role', role.value)
+            
+            # For search, fetch more results to account for filtering
+            if search:
+                fetch_limit = min((limit or 20) * 10, 500)
+                query = query.limit(fetch_limit)
+            else:
+                limit, offset, query = apply_pagination(query, limit, offset)
+            
             response = query.execute()
         except AuthApiError as e:
             raise HTTPException(
@@ -423,65 +498,39 @@ class TeamService:
         if not response.data:
             return {'members': [], 'total': 0, 'limit': limit, 'offset': offset}
         
-        # Batch fetch user info
+        # Batch fetch user info for all members
         user_ids = [UUID4(member['user_id']) for member in response.data]
         users_cache = self._batch_get_user_info(user_ids)
         
+        # Build member list
         members = []
         seen_user_ids = set()
         
-        for member in response.data:
-            user_id_str = str(member['user_id'])
+        for member_data in response.data:
+            user_id_str = str(member_data['user_id'])
             
             # Skip duplicates
             if user_id_str in seen_user_ids:
                 continue
             seen_user_ids.add(user_id_str)
             
+            # Get user info (from cache or fetch if missing)
             user_info = users_cache.get(user_id_str)
-            
-            # If not in cache, fetch from database (cache miss)
             if not user_info:
                 try:
                     user_info = self._get_user_info(UUID4(user_id_str))
-                    if user_info:
-                        users_cache[user_id_str] = user_info
-                    else:
-                        logger.warning(f"User {user_id_str} not found in profiles, skipping from team members")
+                    if not user_info:
+                        logger.warning(f"User {user_id_str} not found in profiles, skipping")
                         continue
+                    users_cache[user_id_str] = user_info
                 except Exception as e:
                     logger.error(f"Failed to fetch user info for {user_id_str}: {e}")
                     continue
             
-            # Email should always be in cache now, but handle edge case
-            email = user_info.get('email')
-            if not email:
-                logger.warning(f"User {user_id_str} has no email, skipping from team members")
-                continue
-            
-            # Apply search filter if provided (filter on display_name and email from profiles)
-            if search:
-                search_lower = search.lower()
-                display_name = user_info.get('display_name', '').lower()
-                email_lower = email.lower()
-                if search_lower not in display_name and search_lower not in email_lower:
-                    continue
-            
-            # Ensure role is converted to string first, then to Enum
-            role_value = member['role']
-            if isinstance(role_value, TeamUserRole):
-                role_enum = role_value
-            else:
-                # Convert string to Enum
-                role_enum = TeamUserRole(str(role_value))
-            
-            members.append(TeamMembersResponse(
-                id=user_info['id'],
-                display_name=user_info.get('display_name', ''),
-                email=email,
-                avatar_url=user_info.get('avatar_url'),
-                role=role_enum,
-            ))
+            # Build team member response
+            team_member = self._build_team_member_from_data(member_data, user_info, search)
+            if team_member:
+                members.append(team_member)
         
         # Apply pagination after filtering if search was provided
         if search:
@@ -493,7 +542,7 @@ class TeamService:
         
         result = {'members': members, 'total': total, 'limit': limit, 'offset': offset}
         
-        # Cache result if no search (convert Pydantic models to dicts for proper serialization)
+        # Cache result if no search
         if not search:
             cache_data = {
                 'members': [member.model_dump(mode='json') for member in members],
@@ -501,7 +550,7 @@ class TeamService:
                 'limit': limit,
                 'offset': offset
             }
-            cache_service.set(f"team:members:{org_id}:{role}:{limit}:{offset}", cache_data, ttl=self.CACHE_TTL_MEMBERS)
+            cache_service.set(cache_key, cache_data, ttl=self.CACHE_TTL_MEMBERS)
         
         return result
     
@@ -680,8 +729,8 @@ class TeamService:
         add_as_admin: bool,
     ) -> None:
         """Create an invitation record and send invitation email."""
-        # Invalidate existing pending invitations for same email + org
-        self._invalidate_existing_invitations(org_id, email)
+        # Note: Invalidation is handled in invite_user() before calling this method
+        # to ensure we have the full email list and project list for exact matching
         
         # Generate secure token
         token = secrets.token_urlsafe(32)
@@ -700,6 +749,7 @@ class TeamService:
                 'expires_at': expires_at.isoformat(),
                 'created_at': datetime.now(timezone.utc).isoformat(),
                 'added_project_ids': [str(pid) for pid in project_ids] if project_ids else None,
+                'status': 'pending',
             }).execute()
         except AuthApiError as e:
             raise HTTPException(
@@ -737,13 +787,74 @@ class TeamService:
                 logger = logging.getLogger(__name__)
                 logger.error(f"Failed to send organization invitation notification: {e}")
     
-    def _invalidate_existing_invitations(self, org_id: UUID4, email: str) -> None:
-        """Mark existing pending invitations as invalidated for the same email + org."""
+    def _invalidate_existing_invitations(
+        self, 
+        org_id: UUID4, 
+        email_list: List[str], 
+        project_ids: List[UUID4]
+    ) -> None:
+        """
+        Invalidate existing pending invitations that match exactly:
+        - Same organization
+        - Same email list (exact match, order doesn't matter)
+        - Same project list (exact match, order doesn't matter)
+        """
         try:
-            supabase.table('invitations').update({
-                'invalidated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('org_id', str(org_id)).contains('email', [email.lower()]).is_('accepted_at', 'null').execute()
-        except Exception:
+            # Fetch all pending invitations for this org
+            response = supabase.table('invitations').select('id, email, added_project_ids').eq(
+                'org_id', str(org_id)
+            ).eq('status', 'pending').execute()
+            
+            if not response.data:
+                return
+            
+            # Normalize the new invitation's email list (lowercase, sorted for comparison)
+            new_email_set = set(e.lower() for e in email_list if e)
+            new_project_set = set(str(pid) for pid in project_ids) if project_ids else set()
+            
+            invitation_ids_to_invalidate = []
+            
+            for inv in response.data:
+                # Get existing invitation's email list
+                inv_emails = inv.get('email', [])
+                if not isinstance(inv_emails, list):
+                    continue
+                
+                # Normalize existing invitation's email list (lowercase, sorted for comparison)
+                existing_email_set = set(e.lower() for e in inv_emails if e)
+                
+                # Get existing invitation's project list
+                inv_projects = inv.get('added_project_ids', [])
+                if not isinstance(inv_projects, list):
+                    inv_projects = []
+                existing_project_set = set(str(pid) for pid in inv_projects if pid)
+                
+                # Check if email lists match exactly (same emails, ignoring order)
+                emails_match = new_email_set == existing_email_set
+                
+                # Check if project lists match exactly (same projects, ignoring order)
+                projects_match = new_project_set == existing_project_set
+                
+                # Only invalidate if BOTH email list AND project list match exactly
+                if emails_match and projects_match:
+                    invitation_ids_to_invalidate.append(inv['id'])
+            
+            # Update status to invalidated for all matching invitations
+            if invitation_ids_to_invalidate:
+                for inv_id in invitation_ids_to_invalidate:
+                    try:
+                        supabase.table('invitations').update({
+                            'status': 'invalidated',
+                        }).eq('id', str(inv_id)).execute()
+                    except Exception as e:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"Failed to invalidate invitation {inv_id}: {str(e)}")
+                        continue
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to invalidate existing invitations for emails {email_list} and projects {project_ids} in org {org_id}: {str(e)}")
             pass
     
     def _validate_invitation_token(self, token: str) -> Dict[str, Any]:
@@ -764,21 +875,49 @@ class TeamService:
         
         invitation = response.data[0]
         
-        # Check if invitation has been invalidated
-        if invitation.get('invalidated_at'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invitation token has been invalidated"
-            )
-        
-        # Check expiration
+        # Check expiration first and update status if expired
         expires_at = datetime.fromisoformat(invitation['expires_at'].replace('Z', '+00:00'))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
+        
+        current_time = datetime.now(timezone.utc)
+        is_expired = expires_at < current_time
+        
+        # Get current status
+        invitation_status = invitation.get('status', 'pending')
+        
+        # If expired and status is still pending, update status to expired
+        if is_expired and invitation_status == 'pending':
+            try:
+                supabase.table('invitations').update({
+                    'status': 'expired',
+                }).eq('id', str(invitation['id'])).execute()
+                invitation_status = 'expired'
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to update invitation status to expired: {str(e)}")
+        
+        # Check status - reject if not pending
+        if invitation_status == 'invalidated':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invitation has been invalidated"
+            )
+        if invitation_status == 'accepted':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invitation has already been accepted"
+            )
+        if invitation_status == 'expired':
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invitation token has expired"
+            )
+        if invitation_status != 'pending':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invitation status is invalid: {invitation_status}"
             )
         
         return invitation
@@ -810,6 +949,7 @@ class TeamService:
         try:
             supabase.table('invitations').update({
                 'accepted_at': datetime.now(timezone.utc).isoformat(),
+                'status': 'accepted',
             }).eq('id', str(invitation_id)).execute()
         except AuthApiError as e:
             import logging
@@ -828,14 +968,20 @@ class TeamService:
     
     def _get_user_info(self, user_id: UUID4) -> Dict[str, Any]:
         """Get user info from profile - Uses UserCache."""
-        cached_user = UserCache.get_user(str(user_id))
+        user_id_str = str(user_id)
+        cached_user = UserCache.get_user(user_id_str)
         if cached_user:
             avatar_url = None
-            if cached_user.get('avatar_file_id'):
+            avatar_file_id = cached_user.get('avatar_file_id')
+            if avatar_file_id:
                 try:
-                    avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
-                except Exception:
-                    pass
+                    avatar_url = self.files_service.get_file_url(UUID4(avatar_file_id))
+                    logger.debug(f"Generated avatar URL for user {user_id_str} from cache: {avatar_url[:50] if avatar_url else 'None'}...")
+                except Exception as e:
+                    logger.warning(f"Failed to get avatar URL for user {user_id_str} from cache (file_id: {avatar_file_id}): {e}")
+                    avatar_url = None
+            else:
+                logger.debug(f"Cached user {user_id_str} has no avatar_file_id")
             
             # Handle both 'id' and 'user_id' keys for cache compatibility
             user_id_value = cached_user.get('id') or cached_user.get('user_id') or str(user_id)
@@ -864,11 +1010,16 @@ class TeamService:
         
         profile = response.data[0]
         avatar_url = None
-        if profile.get('avatar_file_id'):
+        avatar_file_id = profile.get('avatar_file_id')
+        if avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
-            except Exception:
-                pass
+                avatar_url = self.files_service.get_file_url(UUID4(avatar_file_id))
+                logger.debug(f"Generated avatar URL for user {user_id_str} from database: {avatar_url[:50] if avatar_url else 'None'}...")
+            except Exception as e:
+                logger.warning(f"Failed to get avatar URL for user {user_id_str} from database (file_id: {avatar_file_id}): {e}")
+                avatar_url = None
+        else:
+            logger.debug(f"User {user_id_str} has no avatar_file_id in database")
         
         user_data = {
             'id': profile['user_id'],
@@ -908,8 +1059,9 @@ class TeamService:
                     if cached_user.get('avatar_file_id'):
                         try:
                             avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed to get avatar URL for user {user_id_str} from batch cache: {e}")
+                            avatar_url = None
                     
                     # Handle both 'id' and 'user_id' keys for cache compatibility
                     user_id_value = cached_user.get('id') or cached_user.get('user_id') or user_id_str
@@ -940,14 +1092,17 @@ class TeamService:
             # Track which users were found in database
             found_user_ids = set()
             for profile in response.data:
+                user_id_str = str(profile['user_id'])
                 avatar_url = None
                 if profile.get('avatar_file_id'):
                     try:
                         avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
-                    except Exception:
-                        pass
-                
-                user_id_str = str(profile['user_id'])
+                        logger.debug(f"Generated avatar URL for user {user_id_str}: {avatar_url[:50] if avatar_url else 'None'}...")
+                    except Exception as e:
+                        logger.warning(f"Failed to get avatar URL for user {user_id_str} from batch database: {e}")
+                        avatar_url = None
+                else:
+                    logger.debug(f"User {user_id_str} has no avatar_file_id")
                 found_user_ids.add(user_id_str)
                 users_dict[user_id_str] = {
                     'id': profile['user_id'],

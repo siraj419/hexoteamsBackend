@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from supabase_auth.errors import AuthApiError
 from datetime import datetime, timezone, date, time, timedelta
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 
 
 from app.schemas.time_logs.time_logs import (
@@ -32,6 +33,14 @@ def format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def parse_time_string(time_str: str) -> time:
+    """Parse time string from database (supports various formats)."""
+    if '.' in time_str:
+        return datetime.strptime(time_str, "%H:%M:%S.%f").time()
+    else:
+        return datetime.strptime(time_str, "%H:%M:%S").time()
+
+
 class TimeLogService:
     CACHE_TTL_ACTIVE = 30  # 30 seconds for active time log (real-time)
     CACHE_TTL_LIST = 180  # 3 minutes for lists
@@ -39,6 +48,50 @@ class TimeLogService:
     
     def __init__(self):
         pass
+    
+    def _get_user_timezone(self, user_id: UUID4) -> str:
+        """Get user timezone with caching"""
+        cache_key = f"user:timezone:{user_id}"
+        
+        print(f"Getting timezone for user: {user_id}")
+        cached = cache_service.get(cache_key)
+        if cached:
+            print(f"Cached timezone: {cached}")
+            return cached
+        
+        try:
+            response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
+        except AuthApiError:
+            return 'UTC'
+        
+        if not response.data or len(response.data) == 0:
+            return 'UTC'
+        
+        timezone_val = response.data[0].get('timezone', 'UTC')
+        
+        cache_service.set(cache_key, timezone_val, ttl=3600)
+        
+        return timezone_val
+    
+    def _convert_time_to_user_tz(self, time_obj: time, date_obj: date, user_timezone: str) -> time:
+        """Convert UTC time to user timezone"""
+        try:
+            utc_dt = datetime.combine(date_obj, time_obj, tzinfo=timezone.utc)
+            user_tz = ZoneInfo(user_timezone)
+            user_dt = utc_dt.astimezone(user_tz)
+            return user_dt.time()
+        except Exception:
+            return time_obj
+    
+    def _convert_time_to_utc(self, time_obj: time, date_obj: date, user_timezone: str) -> time:
+        """Convert user timezone time to UTC"""
+        try:
+            user_tz = ZoneInfo(user_timezone)
+            user_dt = datetime.combine(date_obj, time_obj, tzinfo=user_tz)
+            utc_dt = user_dt.astimezone(timezone.utc)
+            return utc_dt.time()
+        except Exception:
+            return time_obj
     
     def _invalidate_time_log_caches(self, user_id: UUID4, time_log_id: Optional[UUID4] = None, organization_id: Optional[UUID4] = None):
         """Invalidate time log caches"""
@@ -51,6 +104,20 @@ class TimeLogService:
             cache_service.invalidate_pattern(f"time_logs:list:*")
         if time_log_id:
             cache_service.delete(f"time_log:{time_log_id}")
+    
+    def invalidate_user_timezone_caches(self, user_id: UUID4):
+        """Invalidate user timezone cache and all related time log caches
+        
+        This should be called when a user changes their timezone setting,
+        as all cached time logs will have incorrect time values.
+        """
+        cache_service.delete(f"user:timezone:{user_id}")
+        
+        cache_service.invalidate_pattern(f"time_log:active:{user_id}:*")
+        
+        cache_service.invalidate_pattern(f"time_logs:list:*:{user_id}:*")
+        
+        cache_service.invalidate_pattern(f"time_log:*")
     
     def _verify_time_log_organization(self, time_log_id: UUID4, organization_id: UUID4) -> None:
         """Verify that a time log's project belongs to the organization"""
@@ -171,11 +238,17 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
+        
+        user_tz = self._get_user_timezone(user_id)
+        started_at_utc = parse_time_string(response.data[0]['started_at']) if isinstance(response.data[0]['started_at'], str) else response.data[0]['started_at']
+        log_date = datetime.strptime(response.data[0]['date'], "%Y-%m-%d").date() if isinstance(response.data[0]['date'], str) else response.data[0]['date']
+        started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+        
         result = TimeLogStartResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
-            started_at=response.data[0]['started_at'],
+            started_at=started_at_user_tz,
             stoped_at=response.data[0].get('stoped_at'),
             date=response.data[0]['date'],
             duration_seconds=duration_seconds,
@@ -227,8 +300,10 @@ class TimeLogService:
                     detail="Task does not belong to the specified project"
                 )
             
-            started_at = time_log_request.started_at
-            stoped_at = time_log_request.stoped_at
+            user_tz = self._get_user_timezone(user_id)
+            
+            started_at = self._convert_time_to_utc(time_log_request.started_at, time_log_request.date, user_tz)
+            stoped_at = self._convert_time_to_utc(time_log_request.stoped_at, time_log_request.date, user_tz) if time_log_request.stoped_at else None
             duration_seconds = time_log_request.duration_seconds
             
             if stoped_at is None and duration_seconds is not None:
@@ -280,12 +355,20 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
+        
+        started_at_utc = parse_time_string(response.data[0]['started_at']) if isinstance(response.data[0]['started_at'], str) else response.data[0]['started_at']
+        stoped_at_utc = parse_time_string(response.data[0].get('stoped_at')) if response.data[0].get('stoped_at') and isinstance(response.data[0].get('stoped_at'), str) else response.data[0].get('stoped_at')
+        log_date = datetime.strptime(response.data[0]['date'], "%Y-%m-%d").date() if isinstance(response.data[0]['date'], str) else response.data[0]['date']
+        
+        started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+        stoped_at_user_tz = self._convert_time_to_user_tz(stoped_at_utc, log_date, user_tz) if stoped_at_utc else None
+        
         result = TimeLogCreateResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
-            started_at=response.data[0]['started_at'],
-            stoped_at=response.data[0].get('stoped_at'),
+            started_at=started_at_user_tz,
+            stoped_at=stoped_at_user_tz,
             date=response.data[0]['date'],
             duration_seconds=duration_seconds,
             duration_formatted=format_duration(duration_seconds),
@@ -339,7 +422,7 @@ class TimeLogService:
             
             started_at_str = log['started_at']
             if isinstance(started_at_str, str):
-                started_time = datetime.strptime(started_at_str, "%H:%M:%S.%f").time() if '.' in started_at_str else datetime.strptime(started_at_str, "%H:%M:%S").time()
+                started_time = parse_time_string(started_at_str)
             else:
                 started_time = started_at_str
             
@@ -379,12 +462,21 @@ class TimeLogService:
             )
         
         duration_seconds = response.data[0]['duration_seconds']
+        
+        user_tz = self._get_user_timezone(user_id)
+        started_at_utc = parse_time_string(response.data[0]['started_at']) if isinstance(response.data[0]['started_at'], str) else response.data[0]['started_at']
+        stoped_at_utc = parse_time_string(response.data[0].get('stoped_at')) if response.data[0].get('stoped_at') and isinstance(response.data[0].get('stoped_at'), str) else response.data[0].get('stoped_at')
+        log_date = datetime.strptime(response.data[0]['date'], "%Y-%m-%d").date() if isinstance(response.data[0]['date'], str) else response.data[0]['date']
+        
+        started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+        stoped_at_user_tz = self._convert_time_to_user_tz(stoped_at_utc, log_date, user_tz) if stoped_at_utc else None
+        
         result = TimeLogStopResponse(
             id=response.data[0]['id'],
             project_id=response.data[0]['project_id'],
             task_id=response.data[0]['task_id'],
-            started_at=response.data[0]['started_at'],
-            stoped_at=response.data[0].get('stoped_at'),
+            started_at=started_at_user_tz,
+            stoped_at=stoped_at_user_tz,
             date=response.data[0]['date'],
             duration_seconds=duration_seconds,
             duration_formatted=format_duration(duration_seconds),
@@ -441,7 +533,7 @@ class TimeLogService:
         
         started_at_str = log['started_at']
         if isinstance(started_at_str, str):
-            started_time = datetime.strptime(started_at_str, "%H:%M:%S.%f").time() if '.' in started_at_str else datetime.strptime(started_at_str, "%H:%M:%S").time()
+            started_time = parse_time_string(started_at_str)
         else:
             started_time = started_at_str
         
@@ -456,11 +548,31 @@ class TimeLogService:
         
         elapsed_duration = (current_datetime - started_datetime).total_seconds()
         
+        user_tz = self._get_user_timezone(user_id)
+        started_at_user_tz = self._convert_time_to_user_tz(started_time, log_date, user_tz)
+        
+        # Fetch project and task names
+        project_name = None
+        task_title = None
+        try:
+            project_response = supabase.table('projects').select('name').eq('id', str(log['project_id'])).execute()
+            if project_response.data:
+                project_name = project_response.data[0]['name']
+        except Exception as e:
+            print(f"Error fetching project name: {str(e)}")
+        
+        try:
+            task_response = supabase.table('tasks').select('title').eq('id', str(log['task_id'])).execute()
+            if task_response.data:
+                task_title = task_response.data[0]['title']
+        except Exception as e:
+            print(f"Error fetching task title: {str(e)}")
+        
         result = TimeLogGetResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
-            started_at=log['started_at'],
+            started_at=started_at_user_tz,
             stoped_at=log.get('stoped_at'),
             date=log['date'],
             duration_seconds=elapsed_duration,
@@ -470,6 +582,8 @@ class TimeLogService:
             created_by=log.get('created_by'),
             created_at=log['created_at'],
             updated_at=log['updated_at'],
+            project_name=project_name,
+            task_title=task_title,
         )
         
         # Cache the result
@@ -556,21 +670,61 @@ class TimeLogService:
                 detail=f"Failed to get time logs: {str(e)}"
             )
         
-        time_logs = [TimeLogGetResponse(
-            id=log['id'],
-            project_id=log['project_id'],
-            task_id=log['task_id'],
-            started_at=log['started_at'],
-            stoped_at=log.get('stoped_at'),
-            date=log['date'],
-            duration_seconds=log['duration_seconds'],
-            duration_formatted=format_duration(log['duration_seconds']),
-            status=log['status'],
-            notes=log.get('notes'),
-            created_by=log.get('created_by'),
-            created_at=log['created_at'],
-            updated_at=log['updated_at'],
-        ) for log in response.data] if response.data else []
+        user_tz = self._get_user_timezone(user_id) if user_id else 'UTC'
+        print(user_tz)
+        
+        # Fetch project and task names
+        project_ids = list(set([log['project_id'] for log in response.data])) if response.data else []
+        task_ids = list(set([log['task_id'] for log in response.data])) if response.data else []
+        
+        projects_map = {}
+        if project_ids:
+            try:
+                projects_response = supabase.table('projects').select('id, name').in_('id', project_ids).execute()
+                if projects_response.data:
+                    projects_map = {str(p['id']): p['name'] for p in projects_response.data}
+            except Exception as e:
+                print(f"Error fetching projects: {str(e)}")
+        
+        tasks_map = {}
+        if task_ids:
+            try:
+                tasks_response = supabase.table('tasks').select('id, title').in_('id', task_ids).execute()
+                if tasks_response.data:
+                    tasks_map = {str(t['id']): t['title'] for t in tasks_response.data}
+            except Exception as e:
+                print(f"Error fetching tasks: {str(e)}")
+        
+        time_logs = []
+        if response.data:
+            for log in response.data:
+                log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
+                
+                started_at_utc = parse_time_string(log['started_at']) if isinstance(log['started_at'], str) else log['started_at']
+                started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+                
+                stoped_at_user_tz = None
+                if log.get('stoped_at'):
+                    stoped_at_utc = parse_time_string(log.get('stoped_at')) if isinstance(log.get('stoped_at'), str) else log.get('stoped_at')
+                    stoped_at_user_tz = self._convert_time_to_user_tz(stoped_at_utc, log_date, user_tz)
+                
+                time_logs.append(TimeLogGetResponse(
+                    id=log['id'],
+                    project_id=log['project_id'],
+                    task_id=log['task_id'],
+                    started_at=started_at_user_tz,
+                    stoped_at=stoped_at_user_tz,
+                    date=log['date'],
+                    duration_seconds=log['duration_seconds'],
+                    duration_formatted=format_duration(log['duration_seconds']),
+                    status=log['status'],
+                    notes=log.get('notes'),
+                    created_by=log.get('created_by'),
+                    created_at=log['created_at'],
+                    updated_at=log['updated_at'],
+                    project_name=projects_map.get(str(log['project_id'])),
+                    task_title=tasks_map.get(str(log['task_id'])),
+                ))
         
         total_count = response.count if response.count else 0
         total_duration = sum(log.duration_seconds for log in time_logs)
@@ -621,12 +775,41 @@ class TimeLogService:
             )
         
         duration_seconds = log['duration_seconds']
+        
+        user_tz = self._get_user_timezone(user_id)
+        log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
+        
+        started_at_utc = parse_time_string(log['started_at']) if isinstance(log['started_at'], str) else log['started_at']
+        started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+        
+        stoped_at_user_tz = None
+        if log.get('stoped_at'):
+            stoped_at_utc = parse_time_string(log.get('stoped_at')) if isinstance(log.get('stoped_at'), str) else log.get('stoped_at')
+            stoped_at_user_tz = self._convert_time_to_user_tz(stoped_at_utc, log_date, user_tz)
+        
+        # Fetch project and task names
+        project_name = None
+        task_title = None
+        try:
+            project_response = supabase.table('projects').select('name').eq('id', str(log['project_id'])).execute()
+            if project_response.data:
+                project_name = project_response.data[0]['name']
+        except Exception as e:
+            print(f"Error fetching project name: {str(e)}")
+        
+        try:
+            task_response = supabase.table('tasks').select('title').eq('id', str(log['task_id'])).execute()
+            if task_response.data:
+                task_title = task_response.data[0]['title']
+        except Exception as e:
+            print(f"Error fetching task title: {str(e)}")
+        
         result = TimeLogGetResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
-            started_at=log['started_at'],
-            stoped_at=log.get('stoped_at'),
+            started_at=started_at_user_tz,
+            stoped_at=stoped_at_user_tz,
             date=log['date'],
             duration_seconds=duration_seconds,
             duration_formatted=format_duration(duration_seconds),
@@ -635,6 +818,8 @@ class TimeLogService:
             created_by=log.get('created_by'),
             created_at=log['created_at'],
             updated_at=log['updated_at'],
+            project_name=project_name,
+            task_title=task_title,
         )
         
         # Cache the result
@@ -675,13 +860,18 @@ class TimeLogService:
                     detail="Cannot update a running time log. Please stop it first."
                 )
             
+            user_tz = self._get_user_timezone(user_id)
+            log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
+            
             updates = {}
             if time_log_request.notes is not None:
                 updates['notes'] = time_log_request.notes
             if time_log_request.started_at is not None:
-                updates['started_at'] = time_log_request.started_at.isoformat()
+                started_at_utc = self._convert_time_to_utc(time_log_request.started_at, log_date, user_tz)
+                updates['started_at'] = started_at_utc.isoformat()
             if time_log_request.stoped_at is not None:
-                updates['stoped_at'] = time_log_request.stoped_at.isoformat()
+                stoped_at_utc = self._convert_time_to_utc(time_log_request.stoped_at, log_date, user_tz)
+                updates['stoped_at'] = stoped_at_utc.isoformat()
             if time_log_request.duration_seconds is not None:
                 updates['duration_seconds'] = time_log_request.duration_seconds
             
@@ -707,12 +897,23 @@ class TimeLogService:
         
         log = response.data[0]
         duration_seconds = log['duration_seconds']
+        
+        log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
+        
+        started_at_utc = parse_time_string(log['started_at']) if isinstance(log['started_at'], str) else log['started_at']
+        started_at_user_tz = self._convert_time_to_user_tz(started_at_utc, log_date, user_tz)
+        
+        stoped_at_user_tz = None
+        if log.get('stoped_at'):
+            stoped_at_utc = parse_time_string(log.get('stoped_at')) if isinstance(log.get('stoped_at'), str) else log.get('stoped_at')
+            stoped_at_user_tz = self._convert_time_to_user_tz(stoped_at_utc, log_date, user_tz)
+        
         result = TimeLogUpdateResponse(
             id=log['id'],
             project_id=log['project_id'],
             task_id=log['task_id'],
-            started_at=log['started_at'],
-            stoped_at=log.get('stoped_at'),
+            started_at=started_at_user_tz,
+            stoped_at=stoped_at_user_tz,
             date=log['date'],
             duration_seconds=duration_seconds,
             duration_formatted=format_duration(duration_seconds),

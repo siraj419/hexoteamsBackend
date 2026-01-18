@@ -24,7 +24,7 @@ from app.schemas.chat import (
     ProjectConversationListResponse,
 )
 from app.utils import apply_pagination
-from app.utils.redis_cache import UserCache
+from app.utils.redis_cache import UserCache, cache_service
 from app.utils.inbox_helpers import trigger_direct_message_notification
 from app.services.files import FilesService
 from app.core.config import Settings
@@ -583,6 +583,32 @@ class ChatService:
                     'p_user_id': user_id_str,
                     'p_last_message_created_at': last_message_created_at
                 }).execute()
+                
+                # Update chat_notifications to set unread_count to 0 for this user and project
+                try:
+                    # Get organization_id from the project
+                    project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
+                    if project_response.data and len(project_response.data) > 0:
+                        org_id = project_response.data[0].get('org_id')
+                        if org_id:
+                            # Update or insert chat_notifications record with unread_count = 0
+                            # Use upsert to handle both insert and update cases
+                            supabase.table('chat_notifications').upsert({
+                                'user_id': user_id_str,
+                                'chat_type': 'project',
+                                'reference_id': str(project_id),
+                                'unread_count': 0,
+                                'updated_at': datetime.now(timezone.utc).isoformat()
+                            }, on_conflict='user_id,chat_type,reference_id').execute()
+                            
+                            logger.info(f"Updated chat_notifications: unread_count=0 for user {user_id_str}, project {project_id}")
+                            
+                            # Invalidate all project conversation caches for this user and organization
+                            cache_service.invalidate_pattern(f"project_conversations:{user_id_str}:{org_id}:*")
+                            # Also invalidate any cached unread counts
+                            cache_service.invalidate_pattern(f"chat_notifications:project:{project_id}:{user_id_str}:*")
+                except Exception as cache_error:
+                    logger.warning(f"Failed to update chat_notifications or invalidate cache: {cache_error}")
                 
                 return message_ids
                 
@@ -1283,6 +1309,26 @@ class ChatService:
                 ).lte(
                     'created_at', last_message_created_at
                 ).is_('read_at', 'null').execute()
+                
+                # Update chat_notifications to set unread_count to 0 for this user and conversation
+                try:
+                    # Update or insert chat_notifications record with unread_count = 0
+                    # Use upsert to handle both insert and update cases
+                    supabase.table('chat_notifications').upsert({
+                        'user_id': str(user_id),
+                        'chat_type': 'direct',
+                        'reference_id': str(conversation_id),
+                        'unread_count': 0,
+                        'updated_at': datetime.now(timezone.utc).isoformat()
+                    }, on_conflict='user_id,chat_type,reference_id').execute()
+                    
+                    logger.info(f"Updated chat_notifications: unread_count=0 for user {user_id}, conversation {conversation_id}")
+                    
+                    # Invalidate cache for DM conversations
+                    cache_service.invalidate_pattern(f"direct_conversations:{str(user_id)}:{str(organization_id)}:*")
+                    cache_service.invalidate_pattern(f"chat_notifications:direct:{conversation_id}:{str(user_id)}:*")
+                except Exception as cache_error:
+                    logger.warning(f"Failed to update chat_notifications or invalidate cache: {cache_error}")
             
             return message_ids
             

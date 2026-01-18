@@ -54,7 +54,7 @@ class AttachmentService:
         file_info = self.files_service.get_file(file_id)
         
         # Invalidate attachment caches
-        cache_service.invalidate_pattern(f"attachments:list:{entity_type}:{entity_id}:*")
+        cache_service.invalidate_pattern(f"attachments:list:{entity_type.value}:{entity_id}:*")
         
         # Invalidate project summary cache for project attachments
         if entity_type == AttachmentType.PROJECT:
@@ -201,7 +201,7 @@ class AttachmentService:
             )
         
         # Invalidate attachment caches
-        cache_service.invalidate_pattern(f"attachments:list:{entity_type}:{entity_id}:*")
+        cache_service.invalidate_pattern(f"attachments:list:{entity_type.value}:{entity_id}:*")
         
         # Invalidate project summary cache for project attachments
         if entity_type == AttachmentType.PROJECT:

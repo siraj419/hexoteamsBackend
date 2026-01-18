@@ -502,8 +502,8 @@ class FilesService:
     def delete_permanently_all_files(self, org_id: UUID4) -> bool:
         
         # delete the files from s3 (construct keys with extensions)
-        files, _ = self.get_files(org_id=org_id)
-        files_keys = [f"{file.id}{os.path.splitext(file.name)[1]}" for file in files]
+        files_response = self.get_files(org_id=org_id)
+        files_keys = [f"{file.id}{os.path.splitext(file.name)[1]}" for file in files_response.files]
         try:
             self.s3_service.delete_files(files_keys)
         except (S3ServiceException, Exception) as e:

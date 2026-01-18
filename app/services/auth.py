@@ -5,10 +5,15 @@ from datetime import datetime, timezone
 from supabase_auth.errors import AuthApiError
 from pydantic import EmailStr
 from typing import Any
+import time
+import httpx
 
 from app.core import supabase, settings
 from app.services.files import FilesService
 from app.utils.redis_cache import UserMeCache
+import logging
+
+logger = logging.getLogger(__name__)
 from app.schemas.auth import (
     AuthLoginRequest,
     AuthLoginResponse,
@@ -38,10 +43,15 @@ class AuthService:
     def register(self, auth_request: AuthRegisterRequest) -> AuthRegisterResponse:
         
         # check if the user exists
-        if self._check_user_exists(auth_request.email):
+        response = self._check_user_exists_and_verified(auth_request.email)
+        
+        if response.data[0].get('user_exists'):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User already exists"
+                detail={
+                    "message": "User already exists",
+                    "is_verified": response.data[0].get('verified')
+                }
             )
         
         # register the user
@@ -134,8 +144,16 @@ class AuthService:
                 "email": auth_request.email,
                 "password": auth_request.password
             })
+
         except AuthApiError as e:
-            
+            if e.code == 'email_not_confirmed':
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "message": "Email not confirmed",
+                        "is_verified": False
+                    }
+                )
             if 'you can only auth_request this after' in str(e):
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -144,7 +162,10 @@ class AuthService:
             
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials"
+                detail={
+                    "message": "Invalid credentials",
+                    "is_verified": True
+                }
             )
         
         # save the refresh token in the cookies
@@ -433,16 +454,89 @@ class AuthService:
         )
     
     def _create_profile(self, user: any) -> Any:
-        # check if the profile exists
-        response = (
-            supabase.table('profiles')
-            .select('*')
-            .eq('user_id', user.id)
-            .execute()
-        )
+        max_retries = 3
+        retry_delay = 0.5
         
-        if response.data:
-            return
+        # check if the profile exists by user_id
+        for attempt in range(max_retries):
+            try:
+                response = (
+                    supabase.table('profiles')
+                    .select('*')
+                    .eq('user_id', user.id)
+                    .execute()
+                )
+                break
+            except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"Network error checking profile by user_id (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Failed to check profile by user_id after {max_retries} attempts: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Service temporarily unavailable. Please try again in a moment."
+                    )
+        
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        
+        # Also check by email to avoid duplicate key errors
+        for attempt in range(max_retries):
+            try:
+                email_check = (
+                    supabase.table('profiles')
+                    .select('*')
+                    .eq('email', user.email)
+                    .execute()
+                )
+                break
+            except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"Network error checking profile by email (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Failed to check profile by email after {max_retries} attempts: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Service temporarily unavailable. Please try again in a moment."
+                    )
+        
+        if email_check.data and len(email_check.data) > 0:
+            # Profile exists with this email
+            existing_profile = email_check.data[0]
+            # If user_id is different, update it
+            if existing_profile.get('user_id') != user.id:
+                for attempt in range(max_retries):
+                    try:
+                        update_response = (
+                            supabase.table('profiles')
+                            .update({
+                                'user_id': user.id,
+                                'updated_at': datetime.now(timezone.utc).isoformat(),
+                            })
+                            .eq('email', user.email)
+                            .execute()
+                        )
+                        if update_response.data and len(update_response.data) > 0:
+                            return update_response.data[0]
+                        break
+                    except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)
+                            logger.warning(f"Network error updating profile (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.warning(f"Failed to update profile for email {user.email} after {max_retries} attempts: {e}")
+                    except Exception as e:
+                        logger.warning(f"Failed to update profile for email {user.email}: {e}")
+                        break
+            return existing_profile
         
         # Get display_name from user_metadata, fallback to name, full_name, or email
         display_name = (
@@ -452,26 +546,72 @@ class AuthService:
             user.email.split('@')[0] if user.email else 'User'
         )
         
-        # create profile
-        response = supabase.table('profiles').insert({
-            'user_id': user.id,
-            'email': user.email,
-            'display_name': display_name,
-            'timezone': 'UTC',
-            'created_at': datetime.now(timezone.utc).isoformat(),
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        
-        return response.data
+        # create profile with retry logic
+        for attempt in range(max_retries):
+            try:
+                response = supabase.table('profiles').insert({
+                    'user_id': user.id,
+                    'email': user.email,
+                    'display_name': display_name,
+                    'timezone': 'UTC',
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat(),
+                }).execute()
+                
+                if response.data and len(response.data) > 0:
+                    return response.data[0]
+                return response.data
+            except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"Network error creating profile (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Failed to create profile after {max_retries} attempts: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Service temporarily unavailable. Please try again in a moment."
+                    )
+            except Exception as e:
+                # If insert fails due to duplicate key (race condition), fetch existing profile
+                error_str = str(e)
+                if 'duplicate key' in error_str.lower() or '23505' in error_str:
+                    logger.warning(f"Profile insert failed due to duplicate key for user {user.id}, email {user.email}. Fetching existing profile.")
+                    for fetch_attempt in range(max_retries):
+                        try:
+                            existing_profile = (
+                                supabase.table('profiles')
+                                .select('*')
+                                .eq('email', user.email)
+                                .execute()
+                            )
+                            if existing_profile.data and len(existing_profile.data) > 0:
+                                return existing_profile.data[0]
+                            break
+                        except (httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as fetch_e:
+                            if fetch_attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** fetch_attempt)
+                                logger.warning(f"Network error fetching existing profile (attempt {fetch_attempt + 1}/{max_retries}): {fetch_e}. Retrying in {wait_time}s...")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                logger.error(f"Failed to fetch existing profile after {max_retries} attempts: {fetch_e}")
+                                break
+                # If it's not a duplicate key error, re-raise
+                logger.error(f"Failed to create profile for user {user.id}, email {user.email}: {e}")
+                raise
     
-    def _check_user_exists(self, email: EmailStr) -> bool:
+    def _check_user_exists_and_verified(self, email: EmailStr) -> dict:
         
         try:
-            response = supabase.rpc("check_email_exists", {"email_input": email}).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check if user exists: {e}"
-            )
-
-        return response.data
+            # Check if user exists in profiles table (which links to auth.users)
+            # This doesn't require authentication and works with service role key
+            response = supabase.rpc('check_user_exists_and_verified', {'email_input': email.lower()}).execute()
+            return response
+            
+        except Exception as e:
+            # If checking fails, log and return False to allow signup attempt
+            # Supabase signup will handle duplicate check anyway
+            logger.warning(f"Failed to check if user exists for email {email}: {e}")
+            return False
