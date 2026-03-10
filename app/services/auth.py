@@ -45,14 +45,15 @@ class AuthService:
         # check if the user exists
         response = self._check_user_exists_and_verified(auth_request.email)
         
-        if response.data[0].get('user_exists'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "message": "User already exists",
-                    "is_verified": response.data[0].get('verified')
-                }
-            )
+        if response and hasattr(response, 'data') and response.data:
+            if response.data[0].get('user_exists'):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "User already exists",
+                        "is_verified": response.data[0].get('verified')
+                    }
+                )
         
         # register the user
         try:
