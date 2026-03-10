@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from app.core import supabase
+from app.core import supabase, supabase_auth_client
 from app.utils.websocket_manager import manager
 from app.services.chat import ChatService
 from app.schemas.chat import (
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 async def verify_ws_token(token: str) -> dict:
     """Verify JWT token and return user data"""
     try:
-        response = supabase.auth.get_user(token)
+        response = supabase_auth_client.auth.get_user(token)
         if not response or not response.user:
             return None
         return {"id": response.user.id, "email": response.user.email}

@@ -6,7 +6,7 @@ import time
 import logging
 import httpx
 
-from app.core import supabase
+from app.core import supabase, supabase_auth_client
 from app.schemas.organizations import OrganizationMemberRole
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def get_current_user(request: Request) -> any:
     
     # get the user
     try:
-        user_response = supabase.auth.get_user(token)
+        user_response = supabase_auth_client.auth.get_user(token)
         if not user_response or not user_response.user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

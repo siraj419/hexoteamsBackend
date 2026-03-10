@@ -8,7 +8,7 @@ from typing import Any
 import time
 import httpx
 
-from app.core import supabase, settings
+from app.core import supabase, supabase_auth_client, settings
 from app.services.files import FilesService
 from app.utils.redis_cache import UserMeCache
 import logging
@@ -57,7 +57,7 @@ class AuthService:
         
         # register the user
         try:
-            supabase.auth.sign_up(
+            supabase_auth_client.auth.sign_up(
                 {
                     "email": auth_request.email,
                     "password": auth_request.password,
@@ -90,7 +90,7 @@ class AuthService:
         
         # get the user
         try:
-            user_response = supabase.auth.get_user(auth_request.access_token)
+            user_response = supabase_auth_client.auth.get_user(auth_request.access_token)
         except AuthApiError as e:
             raise e
         
@@ -127,7 +127,7 @@ class AuthService:
         
         # validate the refresh token and get the new access token
         try:
-            auth_response = supabase.auth.refresh_session(refresh_token)
+            auth_response = supabase_auth_client.auth.refresh_session(refresh_token)
         except AuthApiError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -142,7 +142,7 @@ class AuthService:
     
     def login(self, auth_request: AuthLoginRequest, response: Response) -> AuthLoginResponse:
         try:
-            auth_response = supabase.auth.sign_in_with_password({
+            auth_response = supabase_auth_client.auth.sign_in_with_password({
                 "email": auth_request.email,
                 "password": auth_request.password
             })
@@ -179,7 +179,7 @@ class AuthService:
         )
         
         # save supabase session
-        supabase.auth.set_session(auth_response.session.access_token, auth_response.session.refresh_token)
+        supabase_auth_client.auth.set_session(auth_response.session.access_token, auth_response.session.refresh_token)
         
         return AuthLoginResponse(
             access_token=auth_response.session.access_token,
@@ -193,7 +193,7 @@ class AuthService:
         
         # sign out the user
         try:
-            supabase.auth.sign_out()
+            supabase_auth_client.auth.sign_out()
         except AuthApiError as e:
             raise e
 
@@ -208,7 +208,7 @@ class AuthService:
             redirect_url = auth_request.redirect_to or f"{settings.FRONTEND_URL}/reset-password"
             options["redirect_to"] = redirect_url
                 
-            supabase.auth.reset_password_for_email(auth_request.email, options)
+            supabase_auth_client.auth.reset_password_for_email(auth_request.email, options)
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -222,7 +222,7 @@ class AuthService:
     def reset_password(self, auth_request: AuthResetPasswordRequest, response: Response) -> AuthResetPasswordResponse:
         # set the session using the recovery tokens from the email link
         try:
-            supabase.auth.set_session(auth_request.access_token, auth_request.refresh_token)
+            supabase_auth_client.auth.set_session(auth_request.access_token, auth_request.refresh_token)
         except AuthApiError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -231,7 +231,7 @@ class AuthService:
 
         # update the password
         try:
-            supabase.auth.update_user({"password": auth_request.password})
+            supabase_auth_client.auth.update_user({"password": auth_request.password})
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -239,7 +239,7 @@ class AuthService:
             )
             
         # fetch session
-        session = supabase.auth.get_session()
+        session = supabase_auth_client.auth.get_session()
         if not session:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -262,7 +262,7 @@ class AuthService:
     def change_password(self, auth_request: AuthChangePasswordRequest, user: any) -> AuthChangePasswordResponse:
         # Verify current password by attempting to sign in
         try:
-            supabase.auth.sign_in_with_password({
+            supabase_auth_client.auth.sign_in_with_password({
                 "email": user.email,
                 "password": auth_request.current_password
             })
@@ -274,7 +274,7 @@ class AuthService:
 
         # Update the password
         try:
-            supabase.auth.update_user({"password": auth_request.new_password})
+            supabase_auth_client.auth.update_user({"password": auth_request.new_password})
         except AuthApiError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
