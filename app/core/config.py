@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = Field('http://194.195.119.112:8080', description="Frontend application URL used in email redirections")
     
     # Supabase Service Role Key (bypasses RLS for server-side operations)
-    SUPABASE_SERVICE_ROLE_KEY: str
+    SUPABASE_SERVICE_ROLE_KEY: str = "jhfjfdh"
     
     
     # AWS Credentials
