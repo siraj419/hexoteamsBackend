@@ -181,6 +181,9 @@ class AuthService:
         # save supabase session
         supabase_auth_client.auth.set_session(auth_response.session.access_token, auth_response.session.refresh_token)
         
+        # ensure profile exists (covers cases where confirm didn't create one)
+        self._create_profile(auth_response.user)
+        
         return AuthLoginResponse(
             access_token=auth_response.session.access_token,
             expires_in=auth_response.session.expires_in
