@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     # Frontend URL (for email redirections)
     FRONTEND_URL: str = Field('http://194.195.119.112:8080', description="Frontend application URL used in email redirections")
     
-    # Supabase Admin (for creating users)
-    SUPABASE_SERVICE_ROLE_KEY: Optional[str] = Field(default=None, description="Supabase Service Role Key for admin operations")
+    # Supabase Service Role Key (bypasses RLS for server-side operations)
+    SUPABASE_SERVICE_ROLE_KEY: str
     
     
     # AWS Credentials
