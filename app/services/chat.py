@@ -850,18 +850,60 @@ class ChatService:
             last_messages = {}
             if conversation_ids:
                 conversation_ids_str = [str(cid) for cid in conversation_ids]
+                # First, batch fetch all conversations to get user1_id and user2_id
+                convs_response = supabase.table('chat_conversations').select(
+                    'id, user1_id, user2_id'
+                ).in_('id', conversation_ids_str).execute()
+                
+                convs_map = {}
+                if convs_response.data:
+                    for conv in convs_response.data:
+                        convs_map[str(conv['id'])] = {
+                            'user1_id': conv.get('user1_id'),
+                            'user2_id': conv.get('user2_id')
+                        }
+                
                 # Get last message for each conversation
                 for conv_id_str in conversation_ids_str:
                     try:
-                        last_msg_response = supabase.table('chat_messages').select(
-                            'id, body, created_at'
-                        ).eq('conversation_id', conv_id_str).is_('deleted_at', 'null').order(
+                        conv_data = convs_map.get(conv_id_str)
+                        if not conv_data:
+                            continue
+                        
+                        user1_id = conv_data.get('user1_id')
+                        user2_id = conv_data.get('user2_id')
+                        
+                        if not user1_id or not user2_id:
+                            continue
+                        
+                        # Query direct_messages table (not chat_messages) for direct messages
+                        # Filter by organization and participants
+                        # Get messages where both users are involved (either as sender or receiver)
+                        # We'll filter in Python to ensure both participants are involved
+                        last_msg_response = supabase.table('direct_messages').select(
+                            'id, body, created_at, sender_id, receiver_id'
+                        ).eq('organization_id', str(organization_id)).or_(
+                            f"sender_id.eq.{user1_id},sender_id.eq.{user2_id}"
+                        ).or_(
+                            f"receiver_id.eq.{user1_id},receiver_id.eq.{user2_id}"
+                        ).is_('deleted_at', 'null').order(
                             'created_at', desc=True
-                        ).limit(1).execute()
+                        ).limit(10).execute()  # Get more to filter properly
+                        
+                        # Filter to ensure both participants are involved
+                        if last_msg_response.data:
+                            for msg in last_msg_response.data:
+                                sender = msg.get('sender_id')
+                                receiver = msg.get('receiver_id')
+                                # Check if both user1_id and user2_id are involved
+                                if (sender == user1_id and receiver == user2_id) or (sender == user2_id and receiver == user1_id):
+                                    last_messages[conv_id_str] = msg
+                                    break
                         
                         if last_msg_response.data and len(last_msg_response.data) > 0:
                             last_messages[conv_id_str] = last_msg_response.data[0]
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch last message for conversation {conv_id_str}: {str(e)}")
                         pass  # Continue if fetching last message fails
             
             # Enrich conversations with batch-fetched user info, unread counts, and last message preview
