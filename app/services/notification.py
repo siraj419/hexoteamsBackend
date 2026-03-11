@@ -219,7 +219,7 @@ class NotificationService:
     ):
         """Notify user about new direct message"""
         title = f"New message from {sender_name}"
-        message = f"{sender_name}: {message_preview[:100]}"
+        message = f"{message_preview[:100]}"
         
         return await self.send_inbox_notification(
             title=title,
