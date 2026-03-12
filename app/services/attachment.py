@@ -103,8 +103,8 @@ class AttachmentService:
         Optimized to fetch all data in a single query with file info joined.
         Ordered by created_at descending (newest first).
         """
-        # Build cache key
-        cache_key = f"attachments:list:{entity_type}:{entity_id}:{limit}:{offset}"
+        # Build cache key (use .value to match invalidation patterns)
+        cache_key = f"attachments:list:{entity_type.value}:{entity_id}:{limit}:{offset}"
         
         # Check cache first
         cached = cache_service.get(cache_key)
