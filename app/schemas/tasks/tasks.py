@@ -127,14 +127,33 @@ class TaskGetCommentsPaginatedResponse(BaseModel):
     offset: Optional[int] = None
     limit: Optional[int] = None
 
+# TaskProjectInfo and TaskResponse must be defined before classes that
+# use them as forward references (PaginatedSubtasks, TaskSubtasksPaginatedResponse, etc.)
+
+class TaskProjectInfo(BaseModel):
+    id: UUID4
+    name: str
+    avatar_color: Optional[str] = None
+    avatar_icon: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+class TaskResponse(BaseModel):
+    id: UUID4
+    title: str
+    content: Optional[str] = None
+    status: TaskStatus
+    due_date: Optional[datetime] = None
+    assignee: Optional[TaskUserInfoResponse] = None
+    project: Optional[TaskProjectInfo] = None
+
 class TaskSubtasksPaginatedResponse(BaseModel):
-    subtasks: List['TaskResponse']
+    subtasks: List[TaskResponse]
     total: int
     offset: Optional[int] = None
     limit: Optional[int] = None
 
 class TasksPaginatedResponse(BaseModel):
-    tasks: List['TaskResponse']
+    tasks: List[TaskResponse]
     total: int
     offset: Optional[int] = None
     limit: Optional[int] = None
@@ -152,7 +171,7 @@ class PaginatedLinks(BaseModel):
     limit: Optional[int] = None
 
 class PaginatedSubtasks(BaseModel):
-    subtasks: List['TaskResponse'] = []
+    subtasks: List[TaskResponse] = []
     total: int = 0
     offset: Optional[int] = None
     limit: Optional[int] = None
@@ -171,22 +190,6 @@ class TaskGetResponse(BaseModel):
     links_paginated: PaginatedLinks = PaginatedLinks()
     sub_tasks_paginated: PaginatedSubtasks = PaginatedSubtasks()
 
-class TaskProjectInfo(BaseModel):
-    id: UUID4
-    name: str
-    avatar_color: Optional[str] = None
-    avatar_icon: Optional[str] = None
-    avatar_url: Optional[str] = None
-
-class TaskResponse(BaseModel):
-    id: UUID4
-    title: str
-    content: Optional[str] = None
-    status: TaskStatus
-    due_date: Optional[datetime] = None
-    assignee: Optional[TaskUserInfoResponse] = None
-    project: Optional[TaskProjectInfo] = None
-    
 class TaskLinkRequest(LinkRequest):
     pass
 
@@ -208,3 +211,7 @@ class TaskDepthResponse(BaseModel):
     depth_level: int
     is_innermost: bool
     max_allowed_depth: int
+
+# Rebuild models that use forward references
+TaskGetCommentResponse.model_rebuild()
+TaskGetResponse.model_rebuild()
