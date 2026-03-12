@@ -58,6 +58,10 @@ class TaskService:
         self.files_service = FilesService()
         self.attachment_service = AttachmentService(self.files_service)
         self.activity_service = ActivityService(self.files_service)
+    
+    def _format_status(self, status: str) -> str:
+        """Format status value: remove underscores and convert to title case."""
+        return status.replace('_', ' ').title()
             
     def create_task(
         self,
@@ -670,7 +674,7 @@ class TaskService:
                     ActivityType.TASK,
                     task_id,
                     user_id,
-                    f"Task status changed from {old_status} to {task_request.status.value} by {actor_info.display_name}"
+                    f"Task status changed from {self._format_status(old_status)} to {self._format_status(task_request.status.value)} by {actor_info.display_name}"
                 )
             except Exception as e:
                 # Don't fail task update if activity recording fails, but log the error
@@ -752,7 +756,7 @@ class TaskService:
                     ActivityType.TASK,
                     task_id,
                     user_id,
-                    f"Task status changed from {old_status} to {status_request.status.value} by {actor_info.display_name}"
+                    f"Task status changed from {self._format_status(old_status)} to {self._format_status(status_request.status.value)} by {actor_info.display_name}"
                 )
 
                 
