@@ -32,6 +32,9 @@ from .tasks import (
     TaskMinimalResponse,
     ProjectTasksMinimalResponse,
     TaskDepthResponse,
+    PaginatedAttachments,
+    PaginatedLinks,
+    PaginatedSubtasks,
 )
 
 __all__ = [
@@ -68,4 +71,7 @@ __all__ = [
     "TaskMinimalResponse",
     "ProjectTasksMinimalResponse",
     "TaskDepthResponse",
+    "PaginatedAttachments",
+    "PaginatedLinks",
+    "PaginatedSubtasks",
 ]

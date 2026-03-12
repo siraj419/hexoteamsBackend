@@ -139,6 +139,24 @@ class TasksPaginatedResponse(BaseModel):
     offset: Optional[int] = None
     limit: Optional[int] = None
 
+class PaginatedAttachments(BaseModel):
+    attachments: List[AttachmentResponse] = []
+    total: int = 0
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
+class PaginatedLinks(BaseModel):
+    links: List[LinkResponse] = []
+    total: int = 0
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
+class PaginatedSubtasks(BaseModel):
+    subtasks: List['TaskResponse'] = []
+    total: int = 0
+    offset: Optional[int] = None
+    limit: Optional[int] = None
+
 class TaskGetResponse(BaseModel):
     id: UUID4
     title: str
@@ -148,10 +166,10 @@ class TaskGetResponse(BaseModel):
     assignee: Optional[TaskUserInfoResponse] = None
     project_id: UUID4
     comments: Optional[List['TaskGetCommentResponse']] = []
-    attachments: Optional[List[AttachmentResponse]] = []
+    attachments_paginated: PaginatedAttachments = PaginatedAttachments()
     activities: Optional[List[ActivityResponse]] = []
-    links: Optional[List[LinkResponse]] = []
-    sub_tasks: Optional[List[TaskBaseResponse]] = []
+    links_paginated: PaginatedLinks = PaginatedLinks()
+    sub_tasks_paginated: PaginatedSubtasks = PaginatedSubtasks()
 
 class TaskProjectInfo(BaseModel):
     id: UUID4

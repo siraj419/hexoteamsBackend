@@ -246,12 +246,27 @@ def get_task(
     task_id: UUID4,
     project_id: UUID4 = Query(...),
     member: Any = Depends(get_project_member),
+    attachments_limit: Optional[int] = Query(5, description="Limit for attachments pagination"),
+    attachments_offset: Optional[int] = Query(0, description="Offset for attachments pagination"),
+    links_limit: Optional[int] = Query(5, description="Limit for links pagination"),
+    links_offset: Optional[int] = Query(0, description="Offset for links pagination"),
+    subtasks_limit: Optional[int] = Query(5, description="Limit for subtasks pagination"),
+    subtasks_offset: Optional[int] = Query(0, description="Offset for subtasks pagination"),
 ):
     """
-    Get a task by its ID
+    Get a task by its ID with paginated nested resources (attachments, links, subtasks).
     """
     task_service = TaskService()
-    return task_service.get_task(member['user_id'], task_id)
+    return task_service.get_task(
+        member['user_id'],
+        task_id,
+        attachments_limit=attachments_limit,
+        attachments_offset=attachments_offset,
+        links_limit=links_limit,
+        links_offset=links_offset,
+        subtasks_limit=subtasks_limit,
+        subtasks_offset=subtasks_offset,
+    )
 
 @router.get('/{task_id}/assignee', response_model=TaskUserInfoResponse, status_code=status.HTTP_200_OK)
 def get_task_assignee(

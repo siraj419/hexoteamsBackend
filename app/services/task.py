@@ -33,6 +33,9 @@ from app.schemas.tasks import (
     TaskChangeAssigneeRequest,
     TaskChangeStatusRequest,
     TaskUpdateDetailsRequest,
+    PaginatedAttachments,
+    PaginatedLinks,
+    PaginatedSubtasks,
 )
 from app.schemas.attachments import AttachmentType, AttachmentResponse
 
@@ -291,7 +294,13 @@ class TaskService:
         self,
         user_id: UUID4,
         task_id: UUID4,
-    ) -> TaskResponse:
+        attachments_limit: Optional[int] = 5,
+        attachments_offset: Optional[int] = 0,
+        links_limit: Optional[int] = 5,
+        links_offset: Optional[int] = 0,
+        subtasks_limit: Optional[int] = 5,
+        subtasks_offset: Optional[int] = 0,
+    ) -> TaskGetResponse:
         try:
             response = supabase.table('tasks').select('*').eq('id', task_id).execute()
         except AuthApiError as e:
@@ -300,19 +309,28 @@ class TaskService:
                 detail=f"Failed to get task: {e}"
             )
 
-            
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found"
+            )
+
         user_timezone = self._get_user_timezone(user_id)
         link_service = LinkService(user_timezone)
         task_comments, _ = self._get_task_comments(task_id, user_timezone)
-        task_attachments_response = self.attachment_service.get_attachments(AttachmentType.TASk, task_id)
-        task_attachments = task_attachments_response.attachments
+        task_attachments_response = self.attachment_service.get_attachments(
+            AttachmentType.TASk, task_id, limit=attachments_limit, offset=attachments_offset
+        )
         task_activities = self.activity_service.get_activities(task_id, ActivityType.TASK)
-        task_links_response = link_service.get_links(task_id, LinkEntityType.TASK)
-        task_links = task_links_response.links
+        task_links_response = link_service.get_links(
+            task_id, LinkEntityType.TASK, limit=links_limit, offset=links_offset
+        )
         assignee = self._get_user_info(response.data[0]['assignee_id']) if response.data[0]['assignee_id'] else None
-        sub_tasks = self._get_sub_tasks(task_id)
-            
-        
+
+        subtasks_response = self.list_subtasks(
+            task_id, user_id=user_id, limit=subtasks_limit, offset=subtasks_offset
+        )
+
         return TaskGetResponse(
             id=response.data[0]['id'],
             title=response.data[0]['title'],
@@ -322,10 +340,25 @@ class TaskService:
             assignee=assignee,
             project_id=response.data[0]['project_id'],
             comments=task_comments,
-            attachments=task_attachments,
+            attachments_paginated=PaginatedAttachments(
+                attachments=task_attachments_response.attachments,
+                total=task_attachments_response.total,
+                offset=task_attachments_response.offset,
+                limit=task_attachments_response.limit,
+            ),
             activities=task_activities,
-            links=task_links,
-            sub_tasks=sub_tasks,
+            links_paginated=PaginatedLinks(
+                links=task_links_response.links,
+                total=task_links_response.total,
+                offset=task_links_response.offset,
+                limit=task_links_response.limit,
+            ),
+            sub_tasks_paginated=PaginatedSubtasks(
+                subtasks=subtasks_response.subtasks,
+                total=subtasks_response.total,
+                offset=subtasks_response.offset,
+                limit=subtasks_response.limit,
+            ),
         )
     
     def list_tasks(
