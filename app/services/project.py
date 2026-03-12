@@ -1638,6 +1638,9 @@ class ProjectService:
             # We need to filter on the projects.org_id field
             query = query.eq('projects.org_id', str(org_id))
             
+            # Exclude archived projects from favourites
+            query = query.eq('projects.archived', False)
+            
             # Apply pagination
             limit, offset, query = self._apply_pagination(query, limit, offset)
             
@@ -1658,6 +1661,10 @@ class ProjectService:
             
             # Double-check organization ID match (in case of query issues)
             if str(project_data.get('org_id')) != str(org_id):
+                continue
+            
+            # Skip archived projects (additional safety check)
+            if project_data.get('archived', False):
                 continue
             
             avatar_url = None
