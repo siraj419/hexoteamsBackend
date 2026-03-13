@@ -1191,8 +1191,17 @@ class ProjectService:
         
         if name is not None:
             updates['name'] = name
+        
+        # Handle avatar_file_id: 
+        # - If it's not None, set it to the new value
+        # - If it's None AND we're also setting avatar_color/avatar_icon, that means we want to clear it (switch to icon mode)
+        #   This is a heuristic: when switching to icon mode, we send avatar_file_id=null along with color/icon
         if avatar_file_id is not None:
             updates['avatar_file_id'] = str(avatar_file_id)
+        elif avatar_file_id is None and avatar_color is not None and avatar_icon is not None:
+            # Explicitly clear the avatar_file_id (set to NULL in database) when switching to icon mode
+            updates['avatar_file_id'] = None
+        
         if avatar_color is not None:
             updates['avatar_color'] = avatar_color
         if avatar_icon is not None:

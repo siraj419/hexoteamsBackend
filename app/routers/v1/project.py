@@ -575,14 +575,26 @@ def update_project_optimized(
         )
     
     # Validate that at least one field is being updated
-    if not any([
+    # Note: avatar_file_id can be None (to clear it), so we check if it was provided in the request
+    # by checking if it's in the model's fields_set (Pydantic v2) or by checking other fields
+    fields_provided = any([
         project_request.name is not None,
         project_request.avatar_file_id is not None,
         project_request.avatar_color is not None,
         project_request.avatar_icon is not None,
         project_request.start_date is not None,
         project_request.end_date is not None,
-    ]):
+    ])
+    
+    # Also check if avatar_file_id was explicitly set to None (to clear it)
+    # This happens when switching from file avatar to icon avatar
+    avatar_file_id_cleared = (
+        hasattr(project_request, '__pydantic_fields_set__') and 
+        'avatar_file_id' in project_request.__pydantic_fields_set__ and
+        project_request.avatar_file_id is None
+    )
+    
+    if not fields_provided and not avatar_file_id_cleared:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one field must be provided"
