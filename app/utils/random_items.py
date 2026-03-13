@@ -10,7 +10,6 @@ colors = [
     "brown",
     "gray",
     "black",
-    "white",
 ]
 
 # Business Icons (lucide react icons)
