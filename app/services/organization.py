@@ -202,6 +202,23 @@ class OrganizationService:
         file: UploadFile
     ) -> OrganizationChangeAvatarResponse:
         
+        # Check if organization exists and get existing avatar_file_id
+        try:
+            org_response = supabase.table('organizations').select('avatar_file_id').eq('id', str(organization_id)).execute()
+        except AuthApiError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get organization: {e}"
+            )
+        
+        if not org_response.data or len(org_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found"
+            )
+        
+        avatar_file_id = org_response.data[0].get('avatar_file_id')
+        
         # validate the file
         if not self.files_service.validate_file_extension(file.filename):
             raise HTTPException(
@@ -215,13 +232,19 @@ class OrganizationService:
                 detail="File size exceeds the maximum allowed size"
             )
         
-        # upload the file
-        file_data = self.files_service.upload_file(file, user_id, org_id=organization_id)
-        avatar_url = self.files_service.get_file_url(file_data.id)
+        # Update existing file or upload new file
+        if avatar_file_id:
+            file_data = self.files_service.update_file(UUID4(avatar_file_id), file)
+            file_id = UUID4(file_data['id'])
+        else:
+            file_data = self.files_service.upload_file(file, user_id, org_id=organization_id)
+            file_id = file_data.id
+        
+        avatar_url = self.files_service.get_file_url(file_id)
         
         try:
             response = supabase.table('organizations').update({
-                'avatar_file_id': str(file_data.id),
+                'avatar_file_id': str(file_id),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).eq('id', str(organization_id)).execute()
         except AuthApiError as e:
@@ -236,22 +259,22 @@ class OrganizationService:
                 detail="Organization not found"
             )
         
-            # Invalidate organization and active organization caches
-            cache_service.delete(f"organization:{organization_id}")
+        # Invalidate organization and active organization caches
+        cache_service.delete(f"organization:{organization_id}")
+        
+        # Invalidate active organization cache for all users who have this organization as active
+        # This ensures that when they fetch the organization, they get the new avatar_url
+        try:
+            members_response = supabase.table('organization_members').select('user_id').eq(
+                'org_id', str(organization_id)
+            ).eq('active', True).execute()
             
-            # Invalidate active organization cache for all users who have this organization as active
-            # This ensures that when they fetch the organization, they get the new avatar_url
-            try:
-                members_response = supabase.table('organization_members').select('user_id').eq(
-                    'org_id', str(organization_id)
-                ).eq('active', True).execute()
-                
-                if members_response.data:
-                    user_ids = [str(member['user_id']) for member in members_response.data]
-                    ActiveOrganizationCache.delete_many(user_ids)
-            except Exception as e:
-                # Log but don't fail if cache invalidation fails
-                logger.warning(f"Failed to invalidate organization cache: {str(e)}")
+            if members_response.data:
+                user_ids = [str(member['user_id']) for member in members_response.data]
+                ActiveOrganizationCache.delete_many(user_ids)
+        except Exception as e:
+            # Log but don't fail if cache invalidation fails
+            logger.warning(f"Failed to invalidate organization cache: {str(e)}")
         
         return OrganizationChangeAvatarResponse(avatar_url=avatar_url)
     
