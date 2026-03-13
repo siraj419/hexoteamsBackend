@@ -1,4 +1,4 @@
-from pydantic import BaseModel, UUID4, Field
+from pydantic import BaseModel, UUID4, Field, field_validator
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List
@@ -56,6 +56,13 @@ class OrganizationUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, description="The description of the organization", max_length=255)
     avatar_icon: Optional[str] = Field(None, description="The icon of the organization", max_length=255)
     avatar_color: Optional[str] = Field(None, description="The color of the organization", max_length=255)
+    
+    @field_validator('avatar_color')
+    @classmethod
+    def validate_avatar_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v == "white":
+            raise ValueError('White color is not allowed for organization avatars')
+        return v
 
 class OrganizationUpdateResponse(OrganizationResponse):
     pass

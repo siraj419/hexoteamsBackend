@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, UUID4, Field, AnyUrl
+from pydantic import BaseModel, UUID4, Field, AnyUrl, field_validator
 from typing import Optional, List
 from datetime import date, datetime
 
@@ -33,6 +33,13 @@ class ProjectCreateRequest(BaseModel):
     start_date: date
     end_date: Optional[date] = None
     view: Optional[ProjectTasksView] = ProjectTasksView.LIST
+    
+    @field_validator('avatar_color')
+    @classmethod
+    def validate_avatar_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v == "white":
+            raise ValueError('White color is not allowed for project avatars')
+        return v
 
 class ProjectAddMemberRequest(BaseModel):
     user_id: UUID4
@@ -115,6 +122,13 @@ class ProjectUpdateRequest(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     view: Optional[ProjectTasksView] = None
+    
+    @field_validator('avatar_color')
+    @classmethod
+    def validate_avatar_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v == "white":
+            raise ValueError('White color is not allowed for project avatars')
+        return v
 
 class ProjectUpdateOptimizedRequest(BaseModel):
     name: Optional[str] = None
@@ -123,6 +137,13 @@ class ProjectUpdateOptimizedRequest(BaseModel):
     avatar_icon: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    
+    @field_validator('avatar_color')
+    @classmethod
+    def validate_avatar_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v == "white":
+            raise ValueError('White color is not allowed for project avatars')
+        return v
 
 class ProjectUpdateResponse(ProjectResponse):
     pass
