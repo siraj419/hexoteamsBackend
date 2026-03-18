@@ -1711,7 +1711,48 @@ class ChatService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Both users must belong to the same organization"
             )
-    
+
+    def get_workspace_users(self, workspace_id: UUID4) -> List[Dict[str, Any]]:
+        """Fetch all users in the workspace (organization). Selects only id, email, full_name, avatar_url."""
+        try:
+            members_response = supabase.table('organization_members').select('user_id').eq(
+                'org_id', str(workspace_id)
+            ).execute()
+        except Exception as e:
+            logger.error(f"Failed to get workspace members: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to fetch workspace users"
+            )
+        if not members_response.data:
+            return []
+        user_ids = list({m['user_id'] for m in members_response.data})
+        try:
+            profiles_response = supabase.table('profiles').select(
+                'user_id, display_name, email, avatar_file_id'
+            ).in_('user_id', user_ids).execute()
+        except Exception as e:
+            logger.error(f"Failed to get profiles for workspace users: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to fetch workspace users"
+            )
+        result = []
+        for profile in (profiles_response.data or []):
+            avatar_url = None
+            if profile.get('avatar_file_id'):
+                try:
+                    avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                except Exception:
+                    pass
+            result.append({
+                'id': profile['user_id'],
+                'email': profile.get('email'),
+                'full_name': profile.get('display_name'),
+                'avatar_url': avatar_url,
+            })
+        return result
+
     def _search_project_messages(self, user_id: UUID4, search_term: str, limit: int, offset: int) -> Dict[str, Any]:
         """Search project messages accessible to user"""
         try:

@@ -1,6 +1,15 @@
-from pydantic import BaseModel, UUID4, Field
+from pydantic import BaseModel, UUID4, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
+
+
+class WorkspaceUser(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID4
+    email: Optional[str] = None
+    full_name: Optional[str] = Field(None, serialization_alias="fullName")
+    avatar_url: Optional[str] = Field(None, serialization_alias="avatarUrl")
 
 
 class ConversationCreate(BaseModel):

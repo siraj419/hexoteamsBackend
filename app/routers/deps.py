@@ -284,7 +284,7 @@ def verify_organization_membership(organization_id: UUID4, user: any = Depends(g
     """
     try:
         response = supabase.table('organization_members').select('*').eq(
-            'organization_id', str(organization_id)
+            'org_id', str(organization_id)
         ).eq('user_id', user.id).execute()
     except AuthApiError as e:
         raise HTTPException(

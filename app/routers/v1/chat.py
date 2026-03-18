@@ -28,6 +28,7 @@ from app.schemas.chat import (
     AttachmentDownloadResponse,
     ChatAttachmentDetailsResponse,
     ProjectConversationListResponse,
+    WorkspaceUser,
 )
 from app.services.chat import ChatService
 from app.services.files import FilesService
@@ -249,6 +250,22 @@ def get_project_conversations(
     )
     
     return ProjectConversationListResponse(**result)
+
+
+@router.get('/workspaces/{workspace_id}/users', status_code=status.HTTP_200_OK)
+def get_workspace_users(
+    workspace_id: UUID4,
+    user: any = Depends(get_current_user),
+):
+    """
+    Get all users in the workspace for direct messaging.
+
+    Requires: Authenticated user and membership in the workspace.
+    """
+    verify_organization_membership(workspace_id, user)
+    chat_service = ChatService()
+    users_data = chat_service.get_workspace_users(workspace_id)
+    return [WorkspaceUser(**u).model_dump(mode='json', by_alias=True) for u in users_data]
 
 
 @router.get('/direct/conversations', response_model=ConversationListResponse, status_code=status.HTTP_200_OK)
