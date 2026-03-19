@@ -10,7 +10,7 @@ import httpx
 
 from app.core import supabase, supabase_auth_client, settings
 from app.services.files import FilesService
-from app.utils.redis_cache import UserMeCache
+from app.utils.redis_cache import UserMeCache, cache_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -328,8 +328,9 @@ class AuthService:
         # Note: display_name is now stored in profiles table, not in user_metadata
         # So we don't need to update Supabase auth user_metadata anymore
         
-        # Invalidate user cache since profile was updated
         UserMeCache.delete_user(str(user.id))
+        if "timezone" in update_data:
+            cache_service.delete(f"user:timezone:{user.id}")
         
         return AuthUpdateProfileResponse(
             message="Profile updated successfully"

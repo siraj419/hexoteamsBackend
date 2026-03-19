@@ -81,8 +81,8 @@ class TimeLogService:
         """Get user timezone with caching (one lookup per request)."""
         cache_key = f"user:timezone:{user_id}"
         cached = cache_service.get(cache_key)
-        if cached:
-            return cached
+        if cached and isinstance(cached, str) and cached.strip():
+            return cached.strip()
         
         try:
             response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
@@ -92,7 +92,11 @@ class TimeLogService:
         if not response.data or len(response.data) == 0:
             return 'UTC'
         
-        timezone_val = response.data[0].get('timezone', 'UTC')
+        timezone_val = response.data[0].get('timezone') or 'UTC'
+        if not isinstance(timezone_val, str) or not timezone_val.strip():
+            timezone_val = 'UTC'
+        else:
+            timezone_val = timezone_val.strip()
         
         cache_service.set(cache_key, timezone_val, ttl=3600)
         
