@@ -10,7 +10,8 @@ import httpx
 
 from app.core import supabase, supabase_auth_client, settings
 from app.services.files import FilesService
-from app.utils.redis_cache import UserMeCache, cache_service
+from app.services.time_log import TimeLogService
+from app.utils.redis_cache import UserMeCache
 import logging
 
 logger = logging.getLogger(__name__)
@@ -330,7 +331,7 @@ class AuthService:
         
         UserMeCache.delete_user(str(user.id))
         if "timezone" in update_data:
-            cache_service.delete(f"user:timezone:{user.id}")
+            TimeLogService().invalidate_user_timezone_caches(UUID4(str(user.id)))
         
         return AuthUpdateProfileResponse(
             message="Profile updated successfully"
