@@ -315,15 +315,16 @@ class TimeLogService:
                 stopped_datetime = datetime.combine(time_log_request.date, stoped_at)
                 if stopped_datetime < started_datetime:
                     stopped_datetime = datetime.combine(time_log_request.date, time(23, 59, 59))
-                duration_seconds = (stopped_datetime - started_datetime).total_seconds()
+                duration_seconds = int(round((stopped_datetime - started_datetime).total_seconds()))
             elif stoped_at is not None and duration_seconds is not None:
                 started_datetime = datetime.combine(time_log_request.date, started_at)
                 stopped_datetime = datetime.combine(time_log_request.date, stoped_at)
                 if stopped_datetime < started_datetime:
                     stopped_datetime = datetime.combine(time_log_request.date, time(23, 59, 59))
                 calculated_duration = (stopped_datetime - started_datetime).total_seconds()
-                duration_seconds = calculated_duration
+                duration_seconds = int(round(calculated_duration))
             
+            duration_seconds = int(duration_seconds) if not isinstance(duration_seconds, int) else duration_seconds
             now = datetime.now(timezone.utc)
             
             response = supabase.table('time_logs').insert({
@@ -433,7 +434,7 @@ class TimeLogService:
             if stopped_datetime < started_datetime:
                 stopped_datetime = datetime.combine(log_date, time(23, 59, 59))
             
-            duration_seconds = (stopped_datetime - started_datetime).total_seconds()
+            duration_seconds = int(round((stopped_datetime - started_datetime).total_seconds()))
             
             updates = {
                 'stoped_at': current_time.isoformat(),

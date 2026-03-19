@@ -43,6 +43,14 @@ class TimeLogStopRequest(BaseModel):
     notes: Optional[str] = None
 
 
+def _coerce_duration_seconds(v):
+    if v is None:
+        return v
+    if isinstance(v, (int, float)):
+        return int(round(float(v)))
+    return v
+
+
 class TimeLogResponse(BaseModel):
     id: UUID4
     project_id: UUID4
@@ -50,8 +58,13 @@ class TimeLogResponse(BaseModel):
     started_at: Union[time, str]
     stoped_at: Optional[Union[time, str]] = None
     date: date
-    duration_seconds: float
+    duration_seconds: int
     duration_formatted: str
+
+    @field_validator('duration_seconds', mode='before')
+    @classmethod
+    def coerce_duration_int(cls, v):
+        return _coerce_duration_seconds(v)
     status: TimeLogStatus
     notes: Optional[str] = None
     created_by: Optional[UUID4] = None
@@ -133,15 +146,25 @@ class TimeLogGetResponse(TimeLogResponse):
 class TimeLogListResponse(BaseModel):
     time_logs: list[TimeLogGetResponse]
     total_count: int
-    total_duration_seconds: float
+    total_duration_seconds: int
     total_duration_formatted: str
+
+    @field_validator('total_duration_seconds', mode='before')
+    @classmethod
+    def coerce_total_duration_int(cls, v):
+        return _coerce_duration_seconds(v)
 
 
 class TimeLogUpdateRequest(BaseModel):
     notes: Optional[str] = None
     started_at: Optional[Union[time, str]] = None
     stoped_at: Optional[Union[time, str]] = None
-    duration_seconds: Optional[float] = None
+    duration_seconds: Optional[int] = None
+
+    @field_validator('duration_seconds', mode='before')
+    @classmethod
+    def coerce_duration_int(cls, v):
+        return _coerce_duration_seconds(v)
     
     @field_validator('started_at', 'stoped_at', mode='before')
     @classmethod
@@ -168,8 +191,13 @@ class TimeLogCreateRequest(BaseModel):
     date: date
     started_at: Union[time, str]
     stoped_at: Optional[Union[time, str]] = None
-    duration_seconds: Optional[float] = Field(None, ge=0, description="Duration in seconds. If not provided, will be calculated from started_at and stoped_at.")
+    duration_seconds: Optional[int] = Field(None, ge=0, description="Duration in seconds. If not provided, will be calculated from started_at and stoped_at.")
     notes: Optional[str] = None
+
+    @field_validator('duration_seconds', mode='before')
+    @classmethod
+    def coerce_duration_int(cls, v):
+        return _coerce_duration_seconds(v)
     
     @field_validator('started_at', 'stoped_at', mode='before')
     @classmethod
