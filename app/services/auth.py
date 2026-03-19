@@ -65,7 +65,7 @@ class AuthService:
                         "data": {
                             "display_name": auth_request.display_name
                         },
-                        "email_redirect_to": f"{settings.FRONTEND_URL}/email-verification"
+                        "email_redirect_to": f"{settings.FRONTEND_URL}/"
                     }
                 }
             )
