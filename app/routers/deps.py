@@ -30,10 +30,13 @@ def get_current_user(request: Request) -> any:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Unauthorized, provide a valid token"
             )
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.debug("Token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Unauthorized, provide a valid token: {e}"
+            detail="Unauthorized, provide a valid token"
         )
     
     return user_response.user
