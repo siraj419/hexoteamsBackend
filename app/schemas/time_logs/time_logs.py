@@ -4,6 +4,30 @@ from typing import Optional, Union
 from enum import Enum
 
 
+def _parse_time_string(v: str) -> time:
+    """Parse time from string. Handles HH:mm, HH:mm:ss, and HH:mm:ss:00 (extra trailing :00)."""
+    v = v.strip()
+    try:
+        return datetime.strptime(v, '%I:%M:%S %p').time()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(v, '%I:%M %p').time()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(v, '%H:%M:%S').time()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(v, '%H:%M').time()
+    except ValueError:
+        pass
+    if len(v) >= 8 and v[8:].strip().startswith(':'):
+        return datetime.strptime(v[:8], '%H:%M:%S').time()
+    raise ValueError(f"Invalid time format: {v}")
+
+
 class TimeLogStatus(str, Enum):
     RUNNING = "running"
     STOPPED = "stopped"
@@ -122,21 +146,10 @@ class TimeLogUpdateRequest(BaseModel):
     @field_validator('started_at', 'stoped_at', mode='before')
     @classmethod
     def parse_time(cls, v):
-        """Parse time from string (supports both 12-hour and 24-hour formats)"""
         if v is None or isinstance(v, time):
             return v
         if isinstance(v, str):
-            v = v.strip()
-            try:
-                return datetime.strptime(v, '%I:%M:%S %p').time()
-            except ValueError:
-                try:
-                    return datetime.strptime(v, '%I:%M %p').time()
-                except ValueError:
-                    try:
-                        return datetime.strptime(v, '%H:%M:%S').time()
-                    except ValueError:
-                        return datetime.strptime(v, '%H:%M').time()
+            return _parse_time_string(v)
         return v
 
 
@@ -161,21 +174,10 @@ class TimeLogCreateRequest(BaseModel):
     @field_validator('started_at', 'stoped_at', mode='before')
     @classmethod
     def parse_time(cls, v):
-        """Parse time from string (supports both 12-hour and 24-hour formats)"""
         if v is None or isinstance(v, time):
             return v
         if isinstance(v, str):
-            v = v.strip()
-            try:
-                return datetime.strptime(v, '%I:%M:%S %p').time()
-            except ValueError:
-                try:
-                    return datetime.strptime(v, '%I:%M %p').time()
-                except ValueError:
-                    try:
-                        return datetime.strptime(v, '%H:%M:%S').time()
-                    except ValueError:
-                        return datetime.strptime(v, '%H:%M').time()
+            return _parse_time_string(v)
         return v
 
     @model_validator(mode='after')
