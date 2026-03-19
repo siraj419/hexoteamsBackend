@@ -33,12 +33,20 @@ def format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _to_utc_timestamp(d: date, t: time) -> str:
+    """Build ISO timestamp with timezone for timestamp with time zone columns."""
+    dt = datetime.combine(d, t, tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 def parse_time_string(time_str: str) -> time:
-    """Parse time string from database (supports various formats)."""
-    if '.' in time_str:
+    """Parse time string from database (time-only or full ISO timestamp)."""
+    time_str = time_str.strip()
+    if "T" in time_str or (len(time_str) > 12 and ("+" in time_str or "-" in time_str[-6:])):
+        return datetime.fromisoformat(time_str.replace("Z", "+00:00")).time()
+    if "." in time_str:
         return datetime.strptime(time_str, "%H:%M:%S.%f").time()
-    else:
-        return datetime.strptime(time_str, "%H:%M:%S").time()
+    return datetime.strptime(time_str, "%H:%M:%S").time()
 
 
 class TimeLogService:
@@ -207,13 +215,12 @@ class TimeLogService:
                 )
             
             now = datetime.now(timezone.utc)
-            current_time = now.time()
             current_date = now.date()
             
             response = supabase.table('time_logs').insert({
                 'project_id': str(time_log_request.project_id),
                 'task_id': str(time_log_request.task_id),
-                'started_at': current_time.isoformat(),
+                'started_at': now.isoformat(),
                 'date': current_date.isoformat(),
                 'duration_seconds': 0,
                 'status': TimeLogStatus.RUNNING.value,
@@ -330,8 +337,8 @@ class TimeLogService:
             response = supabase.table('time_logs').insert({
                 'project_id': str(time_log_request.project_id),
                 'task_id': str(time_log_request.task_id),
-                'started_at': started_at.isoformat(),
-                'stoped_at': stoped_at.isoformat() if stoped_at else None,
+                'started_at': _to_utc_timestamp(time_log_request.date, started_at),
+                'stoped_at': _to_utc_timestamp(time_log_request.date, stoped_at) if stoped_at else None,
                 'date': time_log_request.date.isoformat(),
                 'duration_seconds': duration_seconds,
                 'status': TimeLogStatus.STOPPED.value,
@@ -419,7 +426,7 @@ class TimeLogService:
                 )
             
             now = datetime.now(timezone.utc)
-            current_time = now.time()
+            log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
             
             started_at_str = log['started_at']
             if isinstance(started_at_str, str):
@@ -427,17 +434,16 @@ class TimeLogService:
             else:
                 started_time = started_at_str
             
-            log_date = datetime.strptime(log['date'], "%Y-%m-%d").date() if isinstance(log['date'], str) else log['date']
-            started_datetime = datetime.combine(log_date, started_time)
-            stopped_datetime = datetime.combine(log_date, current_time)
+            started_datetime = datetime.combine(log_date, started_time, tzinfo=timezone.utc)
+            stopped_datetime = now
             
             if stopped_datetime < started_datetime:
-                stopped_datetime = datetime.combine(log_date, time(23, 59, 59))
+                stopped_datetime = datetime.combine(log_date, time(23, 59, 59), tzinfo=timezone.utc)
             
             duration_seconds = int(round((stopped_datetime - started_datetime).total_seconds()))
             
             updates = {
-                'stoped_at': current_time.isoformat(),
+                'stoped_at': now.isoformat(),
                 'duration_seconds': duration_seconds,
                 'status': TimeLogStatus.STOPPED.value,
                 'updated_at': now.isoformat(),
@@ -869,10 +875,10 @@ class TimeLogService:
                 updates['notes'] = time_log_request.notes
             if time_log_request.started_at is not None:
                 started_at_utc = self._convert_time_to_utc(time_log_request.started_at, log_date, user_tz)
-                updates['started_at'] = started_at_utc.isoformat()
+                updates['started_at'] = _to_utc_timestamp(log_date, started_at_utc)
             if time_log_request.stoped_at is not None:
                 stoped_at_utc = self._convert_time_to_utc(time_log_request.stoped_at, log_date, user_tz)
-                updates['stoped_at'] = stoped_at_utc.isoformat()
+                updates['stoped_at'] = _to_utc_timestamp(log_date, stoped_at_utc)
             if time_log_request.duration_seconds is not None:
                 updates['duration_seconds'] = time_log_request.duration_seconds
             
