@@ -52,7 +52,14 @@ from app.utils.redis_cache import UserMeCache
 logger = logging.getLogger(__name__)
 
 
-def _send_email_sync(email: EmailStr, subject: str, text_content: str) -> None:
+def _send_email_sync(
+    email: EmailStr,
+    subject: str,
+    *,
+    text_content: str | None = None,
+    email_template: str | None = None,
+    template_vars: dict[str, str] | None = None,
+) -> None:
     from app.core import mailer
 
     asyncio.run(
@@ -60,6 +67,8 @@ def _send_email_sync(email: EmailStr, subject: str, text_content: str) -> None:
             email=email,
             subject=subject,
             text_content=text_content,
+            email_template=email_template,
+            template_vars=template_vars,
         )
     )
 
@@ -116,7 +125,9 @@ class AuthService:
             _send_email_sync(
                 email_norm,
                 "Verify your email",
-                f"Confirm your account:\n{verify_url}\n",
+                text_content=f"Confirm your account:\n{verify_url}\n",
+                email_template="signup_confirmation.html",
+                template_vars={"ConfirmationURL": verify_url},
             )
         except HTTPException:
             db.rollback()
@@ -256,7 +267,9 @@ class AuthService:
                 _send_email_sync(
                     email_norm,
                     "Password reset",
-                    f"Reset your password:\n{reset_url}\n",
+                    text_content=f"Reset your password:\n{reset_url}\n",
+                    email_template="reset_password.html",
+                    template_vars={"ConfirmationURL": reset_url},
                 )
         finally:
             db.close()
