@@ -18,4 +18,4 @@ celery_app.conf.update(
     enable_utc=True,
 )
 
-import app.tasks.tasks  # noqa: E402, F401 — register all @celery_app.task in worker and API process
+from app.tasks.tasks import * # noqa: E402, F401 — register all @celery_app.task in worker and API process
