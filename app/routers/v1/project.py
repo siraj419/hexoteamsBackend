@@ -54,10 +54,11 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.db.sync_session import SyncSessionLocal
-from app.models import Profile, Project, ProjectMember
+from app.models import Profile, Project
+from app.models.project_member import ProjectMember as ProjectMemberRow
 
 
-def _project_member_row_to_dict(m: ProjectMember) -> dict:
+def _project_member_row_to_dict(m: ProjectMemberRow) -> dict:
     return {
         "id": str(m.id),
         "project_id": str(m.project_id),
@@ -80,9 +81,9 @@ def get_project_member_for_attachments(project_id: UUID4, user: any = Depends(ge
         db = SyncSessionLocal()
         try:
             m = db.execute(
-                select(ProjectMember).where(
-                    ProjectMember.project_id == UUID(str(project_id)),
-                    ProjectMember.user_id == UUID(str(user.id)),
+                select(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == UUID(str(project_id)),
+                    ProjectMemberRow.user_id == UUID(str(user.id)),
                 )
             ).scalar_one_or_none()
         finally:
@@ -111,9 +112,9 @@ def get_project_owner_or_admin(project_id: UUID4, user: any = Depends(get_curren
         db = SyncSessionLocal()
         try:
             m = db.execute(
-                select(ProjectMember).where(
-                    ProjectMember.project_id == UUID(str(project_id)),
-                    ProjectMember.user_id == UUID(str(user.id)),
+                select(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == UUID(str(project_id)),
+                    ProjectMemberRow.user_id == UUID(str(user.id)),
                 )
             ).scalar_one_or_none()
         finally:
@@ -149,9 +150,9 @@ def get_project_access(project_id: UUID4, user: any = Depends(get_current_user),
         db = SyncSessionLocal()
         try:
             m = db.execute(
-                select(ProjectMember).where(
-                    ProjectMember.project_id == UUID(str(project_id)),
-                    ProjectMember.user_id == UUID(str(user.id)),
+                select(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == UUID(str(project_id)),
+                    ProjectMemberRow.user_id == UUID(str(user.id)),
                 )
             ).scalar_one_or_none()
             if m:
