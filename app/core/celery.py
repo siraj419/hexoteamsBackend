@@ -17,5 +17,6 @@ celery_app.conf.update(
     enable_utc=True,
 )
 
-# Import tasks to register them with celery
+# Import task modules so every @celery_app.task is registered (order: notifications, then auth emails).
 import app.tasks.tasks  # noqa: E402, F401
+import app.tasks.auth_email_tasks  # noqa: E402, F401

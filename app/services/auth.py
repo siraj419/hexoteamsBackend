@@ -46,7 +46,7 @@ from app.schemas.auth import (
 )
 from app.services.files import FilesService
 from app.services.time_log import TimeLogService
-from app.tasks.tasks import send_password_reset_email, send_signup_confirmation_email
+from app.tasks.auth_email_tasks import send_password_reset_email, send_signup_confirmation_email
 from app.utils.redis_cache import UserMeCache
 
 logger = logging.getLogger(__name__)
