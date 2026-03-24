@@ -1,0 +1,39 @@
+/home/hexoteamsBackend/.venv/lib/python3.13/site-packages/celery/platforms.py:841: SecurityWarning: You're running the worker with superuser privileges: this is
+absolutely not recommended!
+
+Please specify a different user using the --uid option.
+
+User information: uid=0 euid=0 gid=0 egid=0
+
+  warnings.warn(SecurityWarning(ROOT_DISCOURAGED.format(
+ 
+ -------------- celery@localhost v5.6.2 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-6.17.0-5-generic-x86_64-with-glibc2.42 2026-03-24 14:17:38
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         app:0x78aade92f0e0
+- ** ---------- .> transport:   redis://:**@localhost:6379/0
+- ** ---------- .> results:     redis://:**@localhost:6379/0
+- *** --- * --- .> concurrency: 4 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . app.tasks.tasks.send_direct_message_notification
+  . app.tasks.tasks.send_email_task
+  . app.tasks.tasks.send_organization_invitation_notification
+  . app.tasks.tasks.send_password_reset_email
+  . app.tasks.tasks.send_project_member_added_notification
+  . app.tasks.tasks.send_signup_confirmation_email
+  . app.tasks.tasks.send_task_assigned_notification
+  . app.tasks.tasks.send_task_completed_notification
+  . app.tasks.tasks.send_task_unassigned_notification
+
+[2026-03-24 14:17:38,398: INFO/MainProcess] Connected to redis://:**@localhost:6379/0
+[2026-03-24 14:17:38,401: INFO/MainProcess] mingle: searching for neighbors
+[2026-03-24 14:17:39,413: INFO/MainProcess] mingle: all alone
+[2026-03-24 14:17:39,428: INFO/MainProcess] celery@localhost ready.

@@ -24,4 +24,5 @@ dependencies = [
     'redis>=6.4.0',
     "sqlalchemy>=2.0.48",
     'uvicorn>=0.40.0',
+    "bcrypt>=5.0.0",
 ]
