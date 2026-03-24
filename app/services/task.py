@@ -6,7 +6,6 @@ from fastapi import HTTPException, status, UploadFile
 from pydantic import UUID4
 from sqlalchemy import and_, delete, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 from typing import Optional, List, Callable, Dict, Any, Tuple
 from datetime import datetime, timezone, date
 
@@ -45,10 +44,11 @@ from app.schemas.attachments import AttachmentType, AttachmentResponse
 
 from app.services.files import FilesService
 from app.services.attachment import AttachmentService
-from app.services.activity import ActivityService, ActivityType
+from app.schemas.activities import ActivityType
+from app.services.activity import ActivityService
 from app.services.link import LinkService, LinkEntityType
 from app.utils import calculate_time_ago, calculate_file_size
-from app.utils.pagination import apply_sa_limit_offset
+from app.utils.sa_pagination import apply_sa_limit_offset
 from app.utils.redis_cache import ProjectSummaryCache, cache_service
 from app.utils.inbox_helpers import (
     trigger_task_assigned_notification,
@@ -1046,6 +1046,13 @@ class TaskService:
             limit=lim,
         )
     
+    @staticmethod
+    def _coerce_task_status(raw: str) -> TaskStatus:
+        try:
+            return TaskStatus(raw)
+        except ValueError:
+            return TaskStatus.TODO
+
     def get_user_tasks(
         self,
         user_id: UUID4,
@@ -1056,198 +1063,99 @@ class TaskService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ):
-        """
-        Get tasks for the user in the active organization.
-        Can filter by: all (assigned OR created), assigned, or created.
-        Returns paginated response with total count.
-        
-        Args:
-            user_id: The user ID
-            org_id: The organization ID
-            task_type: Filter type - "all", "assigned", or "created"
-            search: Optional search term for task title
-            status: Optional task status filter
-            limit: Optional pagination limit
-            offset: Optional pagination offset
-        """
         from app.schemas.tasks import TasksPaginatedResponse
-        
-        # First, get all project IDs in the organization
+
+        oid, uid = UUID(str(org_id)), UUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            projects_response = supabase.table('projects').select('id').eq('org_id', str(org_id)).execute()
-            if not projects_response.data:
+            pids = list(db.scalars(select(Project.id).where(Project.org_id == oid)).all())
+            if not pids:
                 return TasksPaginatedResponse(
                     tasks=[],
                     total=0,
                     offset=offset,
                     limit=limit,
                 )
-            project_ids = [str(project['id']) for project in projects_response.data]
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get projects: {e}"
+
+            base = select(Task).where(
+                Task.project_id.in_(pids),
+                Task.parent_id.is_(None),
             )
-        
-        # Build query based on task_type
-        query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null')
-        
-        # Apply task_type filter
-        if task_type == "assigned":
-            query = query.eq('assignee_id', str(user_id))
-        elif task_type == "created":
-            query = query.eq('created_by', str(user_id))
-        elif task_type == "all":
-            # Get tasks where user is either assignee OR creator
-            # We'll use OR condition: (assignee_id = user_id OR created_by = user_id)
-            # Since Supabase doesn't support OR directly, we'll fetch both and combine
-            assigned_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('assignee_id', str(user_id))
-            created_query = supabase.table('tasks').select('*', count='exact').in_('project_id', project_ids).is_('parent_id', 'null').eq('created_by', str(user_id))
-            
-            if task_status:
-                assigned_query = assigned_query.eq('status', task_status.value)
-                created_query = created_query.eq('status', task_status.value)
-            if search:
-                assigned_query = assigned_query.ilike('title', f'%{search}%')
-                created_query = created_query.ilike('title', f'%{search}%')
-            
-            # Execute both queries
-            try:
-                assigned_response = assigned_query.execute()
-                created_response = created_query.execute()
-            except Exception as e:
+            if task_type == "assigned":
+                stmt_f = base.where(Task.assignee_id == uid)
+            elif task_type == "created":
+                stmt_f = base.where(Task.created_by == uid)
+            elif task_type == "all":
+                stmt_f = base.where(
+                    or_(Task.assignee_id == uid, Task.created_by == uid)
+                )
+            else:
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to get tasks: {e}"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="task_type must be 'all', 'assigned', or 'created'",
                 )
-            
-            # Combine and deduplicate tasks
-            all_tasks = {}
-            if assigned_response.data:
-                for task in assigned_response.data:
-                    all_tasks[str(task['id'])] = task
-            if created_response.data:
-                for task in created_response.data:
-                    all_tasks[str(task['id'])] = task
-            
-            # Convert to list and sort by created_at
-            tasks_list = list(all_tasks.values())
-            tasks_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-            
-            # Apply pagination manually
-            total_count = len(tasks_list)
-            if offset is not None and limit is not None:
-                tasks_list = tasks_list[offset:offset + limit]
-            elif offset is not None:
-                tasks_list = tasks_list[offset:]
-            elif limit is not None:
-                tasks_list = tasks_list[:limit]
-            
-            if not tasks_list:
-                return TasksPaginatedResponse(
-                    tasks=[],
-                    total=total_count,
-                    offset=offset,
-                    limit=limit,
-                )
-            
-            # Get assignee info and project info
-            all_assignee_ids = set()
-            all_project_ids = set()
-            for task in tasks_list:
-                if task.get('assignee_id'):
-                    all_assignee_ids.add(task['assignee_id'])
-                if task.get('project_id'):
-                    all_project_ids.add(task['project_id'])
-            
-            assignee_cache = {}
-            if all_assignee_ids:
-                assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
-            
-            project_cache = {}
-            if all_project_ids:
-                project_cache = self._batch_get_project_info([UUID4(pid) if isinstance(pid, str) else pid for pid in all_project_ids])
-            
-            tasks = [TaskResponse(
-                id=task['id'],
-                title=task['title'],
-                content=task['content'],
-                status=task['status'],
-                due_date=task['due_date'],
-                assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
-                project=project_cache.get(str(task['project_id'])) if task.get('project_id') else None,
-            ) for task in tasks_list]
-            
-            return TasksPaginatedResponse(
-                tasks=tasks,
-                total=total_count,
-                offset=offset,
-                limit=limit,
+            if task_status:
+                stmt_f = stmt_f.where(Task.status == task_status.value)
+            if search:
+                stmt_f = stmt_f.where(Task.title.ilike(f"%{search}%"))
+
+            total_count = (
+                db.scalar(select(func.count()).select_from(stmt_f.subquery())) or 0
             )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="task_type must be 'all', 'assigned', or 'created'"
-            )
-        
-        # For assigned or created, continue with single query
-        if task_status:
-            query = query.eq('status', task_status.value)
-        if search:
-            query = query.ilike('title', f'%{search}%')
-        
-        query = query.order('created_at', desc=True)
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
-        try:
-            response = query.execute()
+            ordered = stmt_f.order_by(Task.created_at.desc())
+            lim, off, page_stmt = apply_sa_limit_offset(ordered, limit, offset)
+            rows = list(db.scalars(page_stmt).all())
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get tasks: {e}"
+                detail=f"Failed to get tasks: {e}",
             )
-        
-        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
-        
-        if not response.data:
-            return TasksPaginatedResponse(
-                tasks=[],
-                total=total_count,
-                offset=offset,
-                limit=limit,
-            )
-        
+        finally:
+            db.close()
+
         all_assignee_ids = set()
         all_project_ids = set()
-        for task in response.data:
-            if task.get('assignee_id'):
-                all_assignee_ids.add(task['assignee_id'])
-            if task.get('project_id'):
-                all_project_ids.add(task['project_id'])
-        
+        for t in rows:
+            if t.assignee_id:
+                all_assignee_ids.add(t.assignee_id)
+            if t.project_id:
+                all_project_ids.add(t.project_id)
+
         assignee_cache = {}
         if all_assignee_ids:
-            assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
-        
+            assignee_cache = self._batch_get_user_info(
+                [UUID4(str(x)) for x in all_assignee_ids]
+            )
         project_cache = {}
         if all_project_ids:
-            project_cache = self._batch_get_project_info([UUID4(pid) if isinstance(pid, str) else pid for pid in all_project_ids])
-        
-        tasks = [TaskResponse(
-            id=task['id'],
-            title=task['title'],
-            content=task['content'],
-            status=task['status'],
-            due_date=task['due_date'],
-            assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
-            project=project_cache.get(str(task['project_id'])) if task.get('project_id') else None,
-        ) for task in response.data]
-        
+            project_cache = self._batch_get_project_info(
+                [UUID4(str(x)) for x in all_project_ids]
+            )
+
+        tasks = [
+            TaskResponse(
+                id=UUID4(str(t.id)),
+                title=t.title,
+                content=t.content,
+                status=self._coerce_task_status(t.status),
+                due_date=t.due_date,
+                assignee=assignee_cache.get(str(t.assignee_id))
+                if t.assignee_id
+                else None,
+                project=project_cache.get(str(t.project_id))
+                if t.project_id
+                else None,
+            )
+            for t in rows
+        ]
+
         return TasksPaginatedResponse(
             tasks=tasks,
-            total=total_count,
-            offset=offset,
-            limit=limit,
+            total=int(total_count),
+            offset=off,
+            limit=lim,
         )
     
     def get_task_attachments(
@@ -1257,66 +1165,77 @@ class TaskService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> List[TaskGetAttachmentResponse]:
-        query = supabase.table('task_attachments').select('*').eq('task_id', task_id)
-        if user_id:
-            query = query.eq('created_by', user_id)
-        if limit:
-            query = query.limit(limit)
-        if offset:
-            query = query.offset(offset)
-            
+        _ = user_id
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            stmt = (
+                select(Attachment)
+                .where(
+                    Attachment.entity_type == AttachmentType.TASk.value,
+                    Attachment.entity_id == tid,
+                )
+                .order_by(Attachment.created_at.desc())
+            )
+            if offset:
+                stmt = stmt.offset(offset)
+            if limit:
+                stmt = stmt.limit(limit)
+            rows = list(db.scalars(stmt).all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task attachments: {e}"
+                detail=f"Failed to get task attachments: {e}",
             )
-        
+        finally:
+            db.close()
+
         attachments = []
-        for attachment in response.data:
-            file_data = self.files_service.get_file_with_url(attachment['file_id'])
-            attachments.append(TaskGetAttachmentResponse(
-                id=attachment['id'],
-                file_id=attachment['file_id'],
-                file_name=file_data['file']['name'],
-                task_id=attachment['task_id'],
-                created_at=attachment['created_at'],
-                updated_at=attachment['updated_at'],
-                file_url=file_data['file_url'],
-            ))
-        
+        for att in rows:
+            file_data = self.files_service.get_file_with_url(UUID4(str(att.file_id)))
+            ts = att.created_at
+            attachments.append(
+                TaskGetAttachmentResponse(
+                    id=UUID4(str(att.id)),
+                    file_id=UUID4(str(att.file_id)),
+                    file_name=file_data["file"]["name"],
+                    task_id=task_id,
+                    created_at=ts,
+                    updated_at=ts,
+                )
+            )
         return attachments
     
     def get_task_attachment_with_url(
         self,
         attachment_id: UUID4,
     ) -> TaskGetAttachmentWithUrlResponse:
+        aid = UUID(str(attachment_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('task_attachments').select('*').eq('id', attachment_id).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task attachment with url: {e}"
-            )
-        
-        if not response.data or len(response.data) == 0:
+            row = db.get(Attachment, aid)
+        finally:
+            db.close()
+
+        if (
+            not row
+            or row.entity_type != AttachmentType.TASk.value
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task attachment not found"
+                detail="Task attachment not found",
             )
-            
-        # get the file data and url
-        file_data = self.files_service.get_file_with_url(response.data[0]['file_id'])
-        file_url = self.files_service.get_file_url(response.data[0]['file_id'])
-        
+
+        file_data = self.files_service.get_file_with_url(UUID4(str(row.file_id)))
+        file_url = self.files_service.get_file_url(UUID4(str(row.file_id)))
+        ts = row.created_at
         return TaskGetAttachmentWithUrlResponse(
-            id=response.data[0]['id'],
-            file_id=response.data[0]['file_id'],
-            file_name=response.data[0]['file_name'],
-            task_id=response.data[0]['task_id'],
-            created_at=response.data[0]['created_at'],
-            updated_at=response.data[0]['updated_at'],
+            id=UUID4(str(row.id)),
+            file_id=UUID4(str(row.file_id)),
+            file_name=file_data["file"]["name"],
+            task_id=UUID4(str(row.entity_id)),
+            created_at=ts,
+            updated_at=ts,
             file_url=file_url,
         )
     
@@ -1352,36 +1271,52 @@ class TaskService:
         Recursively get all replies for a comment with their attachments and nested subreplies
         Uses cached user info to avoid repeated queries.
         """
+        pid = UUID(str(comment_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('task_comments').select('id, content, created_by, created_at').eq('parent_id', str(comment_id)).order('created_at', desc=False).execute()
+            rows = list(
+                db.scalars(
+                    select(TaskComment)
+                    .where(TaskComment.parent_id == pid)
+                    .order_by(TaskComment.created_at.asc())
+                ).all()
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get comment replies: {e}"
+                detail=f"Failed to get comment replies: {e}",
             )
-        
-        if not response.data:
+        finally:
+            db.close()
+
+        if not rows:
             return []
-        
+
         replies = []
-        for reply in response.data:
-            user_id_str = str(reply['created_by'])
-            user_info = user_info_cache.get(user_id_str)
-            if not user_info:
-                user_info = self._get_user_info(reply['created_by'])
+        for reply in rows:
+            rid = str(reply.id)
+            cb = reply.created_by
+            user_id_str = str(cb) if cb else ""
+            user_info = user_info_cache.get(user_id_str) if user_id_str else None
+            if not user_info and cb:
+                user_info = self._get_user_info(UUID4(str(cb)))
                 user_info_cache[user_id_str] = user_info
-            
-            subreplies = self._get_task_comment_replies(reply['id'], user_timezone, user_info_cache)
-            attachments = self._batch_get_attachments([str(reply['id'])])
-            
-            replies.append(TaskGetCommentResponse(
-                id=reply['id'],
-                content=reply['content'],
-                comment_by=user_info,
-                message_time=calculate_time_ago(reply['created_at'], user_timezone),
-                attachments=attachments.get(str(reply['id']), []),
-                replies=subreplies,
-            ))
+
+            subreplies = self._get_task_comment_replies(
+                UUID4(str(reply.id)), user_timezone, user_info_cache
+            )
+            attachments = self._batch_get_attachments([rid])
+
+            replies.append(
+                TaskGetCommentResponse(
+                    id=UUID4(str(reply.id)),
+                    content=reply.content,
+                    comment_by=user_info,
+                    message_time=calculate_time_ago(reply.created_at, user_timezone),
+                    attachments=attachments.get(rid, []),
+                    replies=subreplies,
+                )
+            )
         
         return replies
     
@@ -1397,48 +1332,70 @@ class TaskService:
         Returns tuple of (comments, total_count)
         Highly optimized: fetches all data in minimal queries and builds tree in memory.
         """
-        
-        query = supabase.table('task_comments').select('id, content, created_by, created_at', count='exact').eq('task_id', str(task_id)).is_('parent_id', 'null').order('created_at', desc=True)
-        
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            filt = (TaskComment.task_id == tid) & (TaskComment.parent_id.is_(None))
+            total_count = (
+                db.scalar(
+                    select(func.count()).select_from(TaskComment).where(filt)
+                )
+                or 0
+            )
+            stmt = (
+                select(TaskComment)
+                .where(filt)
+                .order_by(TaskComment.created_at.desc())
+            )
+            lim, off, page_stmt = apply_sa_limit_offset(stmt, limit, offset)
+            top_rows = list(db.scalars(page_stmt).all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task comments: {e}"
+                detail=f"Failed to get task comments: {e}",
             )
-        
-        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
-        
-        if not response.data:
-            return [], total_count
-        
-        base_comment_ids = [str(comment['id']) for comment in response.data]
-        
+        finally:
+            db.close()
+
+        if not top_rows:
+            return [], int(total_count)
+
+        top_data = [
+            {
+                "id": str(c.id),
+                "content": c.content,
+                "created_by": str(c.created_by) if c.created_by else None,
+                "created_at": c.created_at,
+                "parent_id": str(c.parent_id) if c.parent_id else None,
+            }
+            for c in top_rows
+        ]
+        base_comment_ids = [c["id"] for c in top_data]
+
         all_user_ids = set()
-        for comment in response.data:
-            if comment.get('created_by'):
-                all_user_ids.add(comment['created_by'])
-        
+        for comment in top_data:
+            if comment.get("created_by"):
+                all_user_ids.add(comment["created_by"])
+
         comments_by_parent = self._get_all_comments_for_task(task_id, base_comment_ids)
-        
-        for parent_id, comments in comments_by_parent.items():
+
+        for comments in comments_by_parent.values():
             for comment in comments:
-                if comment.get('created_by'):
-                    all_user_ids.add(comment['created_by'])
-        
+                if comment.get("created_by"):
+                    all_user_ids.add(comment["created_by"])
+
         all_comment_ids = []
         for comments in comments_by_parent.values():
-            all_comment_ids.extend([str(c['id']) for c in comments])
+            all_comment_ids.extend([str(c["id"]) for c in comments])
         all_comment_ids.extend(base_comment_ids)
-        
-        user_info_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_user_ids])
+
+        user_info_cache = self._batch_get_user_info(
+            [UUID4(uid) if isinstance(uid, str) else uid for uid in all_user_ids]
+        )
         attachments_by_comment = self._batch_get_attachments(all_comment_ids)
-        
+
         comments = []
-        for comment in response.data:
+        for comment in top_data:
             comments.append(
                 self._build_comment_tree(
                     comment,
@@ -1448,8 +1405,8 @@ class TaskService:
                     user_timezone,
                 )
             )
-        
-        return comments, total_count
+
+        return comments, int(total_count)
     
     def _get_all_comments_for_task(
         self,
@@ -1462,25 +1419,43 @@ class TaskService:
         """
         if not base_comment_ids:
             return {}
-        
+
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            # Get all comments that are replies to the base comments or their descendants
-            # We'll fetch all comments for this task that have a parent_id
-            response = supabase.table('task_comments').select('id, content, created_by, created_at, parent_id').eq('task_id', str(task_id)).not_.is_('parent_id', 'null').order('created_at', desc=False).execute()
+            rows = list(
+                db.scalars(
+                    select(TaskComment)
+                    .where(
+                        TaskComment.task_id == tid,
+                        TaskComment.parent_id.isnot(None),
+                    )
+                    .order_by(TaskComment.created_at.asc())
+                ).all()
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get all comments for task: {e}"
+                detail=f"Failed to get all comments for task: {e}",
             )
-        
-        # Organize comments by parent_id
+        finally:
+            db.close()
+
         comments_by_parent: Dict[str, List[Dict]] = {}
-        for comment in response.data:
-            parent_id = str(comment['parent_id'])
+        for c in rows:
+            parent_id = str(c.parent_id) if c.parent_id else ""
             if parent_id not in comments_by_parent:
                 comments_by_parent[parent_id] = []
-            comments_by_parent[parent_id].append(comment)
-        
+            comments_by_parent[parent_id].append(
+                {
+                    "id": str(c.id),
+                    "content": c.content,
+                    "created_by": str(c.created_by) if c.created_by else None,
+                    "created_at": c.created_at,
+                    "parent_id": parent_id,
+                }
+            )
+
         return comments_by_parent
     
     def _batch_get_attachments(
@@ -1494,28 +1469,40 @@ class TaskService:
         if not comment_ids:
             return {}
         
+        uuids = [UUID(cid) for cid in comment_ids]
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('attachments').select('id, file_id, entity_id, files(name, size_bytes, content_type)').eq('entity_type', AttachmentType.COMMENT.value).in_('entity_id', comment_ids).execute()
+            rows = db.execute(
+                select(Attachment, File.name, File.size_bytes, File.content_type)
+                .join(File, File.id == Attachment.file_id)
+                .where(
+                    Attachment.entity_type == AttachmentType.COMMENT.value,
+                    Attachment.entity_id.in_(uuids),
+                )
+            ).all()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to batch get attachments: {e}"
+                detail=f"Failed to batch get attachments: {e}",
             )
-        
+        finally:
+            db.close()
+
         attachments_by_comment: Dict[str, List[AttachmentResponse]] = {}
-        for attachment in response.data:
-            comment_id = str(attachment['entity_id'])
+        for attachment, fname, fsize, fctype in rows:
+            comment_id = str(attachment.entity_id)
             if comment_id not in attachments_by_comment:
                 attachments_by_comment[comment_id] = []
-            
-            attachments_by_comment[comment_id].append(AttachmentResponse(
-                id=attachment['id'],
-                file_id=attachment['file_id'],
-                file_name=attachment['files']['name'],
-                file_size=calculate_file_size(attachment['files']['size_bytes']),
-                content_type=attachment['files']['content_type'],
-            ))
-        
+            attachments_by_comment[comment_id].append(
+                AttachmentResponse(
+                    id=UUID4(str(attachment.id)),
+                    file_id=UUID4(str(attachment.file_id)),
+                    file_name=fname or "",
+                    file_size=calculate_file_size(fsize or 0),
+                    content_type=fctype or "",
+                )
+            )
+
         return attachments_by_comment
     
     def _build_comment_tree(
@@ -1566,55 +1553,77 @@ class TaskService:
         self,
         task_id: UUID4,
     ) -> List[TaskBaseResponse]:
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('tasks').select('id, title, content, status, due_date, assignee_id, project_id').eq('parent_id', str(task_id)).execute()
-        except AuthApiError as e:
+            rows = list(
+                db.scalars(
+                    select(Task).where(Task.parent_id == tid)
+                ).all()
+            )
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get subtasks: {e}"
+                detail=f"Failed to get subtasks: {e}",
             )
-        
-        if not response.data:
+        finally:
+            db.close()
+
+        if not rows:
             return []
-        
-        return [TaskBaseResponse(
-            id=task['id'],
-            title=task['title'],
-            content=task['content'],
-            status=task['status'],
-            due_date=task['due_date'],
-            assignee_id=task['assignee_id'],
-            project_id=task['project_id'],
-        ) for task in response.data]
+
+        return [
+            TaskBaseResponse(
+                id=UUID4(str(t.id)),
+                title=t.title,
+                content=t.content,
+                status=self._coerce_task_status(t.status),
+                due_date=t.due_date,
+                assignee_id=UUID4(str(t.assignee_id)) if t.assignee_id else None,
+                project_id=UUID4(str(t.project_id)),
+            )
+            for t in rows
+        ]
     
     def _get_user_info(
         self,
         user_id: UUID4,
     ) -> TaskUserInfoResponse:
+        uid = UUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('profiles').select('user_id, display_name, avatar_file_id').eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
+            row = db.execute(
+                select(
+                    Profile.user_id,
+                    Profile.display_name,
+                    Profile.avatar_file_id,
+                ).where(Profile.user_id == uid)
+            ).one_or_none()
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get user info: {e}"
+                detail=f"Failed to get user info: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+
+        if not row:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                detail="User not found",
             )
-        
+
+        p_uid, display_name, avatar_file_id = row
         avatar_url = None
-        if response.data[0].get('avatar_file_id'):
+        if avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
+                avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
             except Exception:
                 pass
-        
+
         return TaskUserInfoResponse(
-            id=response.data[0]['user_id'],
-            display_name=response.data[0]['display_name'],
+            id=UUID4(str(p_uid)),
+            display_name=display_name,
             avatar_url=avatar_url,
         )
     
@@ -1629,30 +1638,39 @@ class TaskService:
         if not user_ids:
             return {}
         
+        user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in user_ids]
+        uuids = [UUID(x) for x in user_id_strings]
+        db = SyncSessionLocal()
         try:
-            user_id_strings = [str(uid) if isinstance(uid, UUID) else uid for uid in user_ids]
-            response = supabase.table('profiles').select('user_id, display_name, avatar_file_id').in_('user_id', user_id_strings).execute()
-        except AuthApiError as e:
+            rows = db.execute(
+                select(
+                    Profile.user_id,
+                    Profile.display_name,
+                    Profile.avatar_file_id,
+                ).where(Profile.user_id.in_(uuids))
+            ).all()
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to batch get user info: {e}"
+                detail=f"Failed to batch get user info: {e}",
             )
-        
+        finally:
+            db.close()
+
         user_info_dict = {}
-        for profile in response.data:
+        for p_uid, display_name, avatar_file_id in rows:
             avatar_url = None
-            if profile.get('avatar_file_id'):
+            if avatar_file_id:
                 try:
-                    avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                    avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
                 except Exception:
                     pass
-            
-            user_info_dict[str(profile['user_id'])] = TaskUserInfoResponse(
-                id=UUID4(profile['user_id']),
-                display_name=profile['display_name'],
+            user_info_dict[str(p_uid)] = TaskUserInfoResponse(
+                id=UUID4(str(p_uid)),
+                display_name=display_name,
                 avatar_url=avatar_url,
             )
-        
+
         return user_info_dict
     
     def _batch_get_project_info(
@@ -1690,45 +1708,58 @@ class TaskService:
         
         # Fetch uncached projects from database
         if uncached_project_ids:
+            project_id_strings = [
+                str(pid) if isinstance(pid, UUID) else pid for pid in uncached_project_ids
+            ]
+            puuids = [UUID(x) for x in project_id_strings]
+            db = SyncSessionLocal()
             try:
-                project_id_strings = [str(pid) if isinstance(pid, UUID) else pid for pid in uncached_project_ids]
-                response = supabase.table('projects').select('id, name, avatar_color, avatar_icon, avatar_file_id').in_('id', project_id_strings).execute()
-            except AuthApiError as e:
+                rows = db.execute(
+                    select(
+                        Project.id,
+                        Project.name,
+                        Project.avatar_color,
+                        Project.avatar_icon,
+                        Project.avatar_file_id,
+                    ).where(Project.id.in_(puuids))
+                ).all()
+            except Exception as e:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to batch get project info: {e}"
+                    detail=f"Failed to batch get project info: {e}",
                 )
-            
-            # Process fetched projects and cache them
-            for project in response.data:
-                project_id_str = str(project['id'])
+            finally:
+                db.close()
+
+            for pid, name, avc, avi, avf in rows:
+                project_id_str = str(pid)
                 avatar_url = None
-                
-                if project.get('avatar_file_id'):
+                if avf:
                     try:
-                        avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
+                        avatar_url = self.files_service.get_file_url(UUID4(str(avf)))
                     except Exception:
                         pass
-                
+
                 project_info = TaskProjectInfo(
-                    id=UUID4(project['id']),
-                    name=project['name'],
-                    avatar_color=project.get('avatar_color'),
-                    avatar_icon=project.get('avatar_icon'),
+                    id=UUID4(str(pid)),
+                    name=name,
+                    avatar_color=avc,
+                    avatar_icon=avi,
                     avatar_url=avatar_url,
                 )
-                
+
                 project_info_dict[project_id_str] = project_info
-                
-                # Cache the project info using CacheService
+
                 cache_data = {
-                    'id': project_id_str,
-                    'name': project['name'],
-                    'avatar_color': project.get('avatar_color'),
-                    'avatar_icon': project.get('avatar_icon'),
-                    'avatar_url': avatar_url,
+                    "id": project_id_str,
+                    "name": name,
+                    "avatar_color": avc,
+                    "avatar_icon": avi,
+                    "avatar_url": avatar_url,
                 }
-                cache_service.set(f"project_info:{project_id_str}", cache_data, ttl=CACHE_TTL)
+                cache_service.set(
+                    f"project_info:{project_id_str}", cache_data, ttl=CACHE_TTL
+                )
         
         return project_info_dict
     
@@ -1736,18 +1767,21 @@ class TaskService:
         self,
         user_id: UUID4,
     ) -> str:
+        uid = UUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
+            tz = db.scalar(select(Profile.timezone).where(Profile.user_id == uid))
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get user timezone: {e}"
+                detail=f"Failed to get user timezone: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            return 'utc'
-        
-        return response.data[0].get('timezone', 'utc')
+        finally:
+            db.close()
+
+        if not tz:
+            return "utc"
+        return str(tz)
     
     def _get_depth(
         self,
@@ -1772,22 +1806,26 @@ class TaskService:
         table_name: str,
         entity_id: UUID4,
     ) -> Optional[UUID4]:
+        if table_name != "tasks":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported table for parent resolution",
+            )
+        eid = UUID(str(entity_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table(table_name).select('parent_id').eq('id', str(entity_id)).execute()
-        except AuthApiError as e:
+            pid = db.scalar(select(Task.parent_id).where(Task.id == eid))
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get parent id: {e}"
+                detail=f"Failed to get parent id: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+
+        if not pid:
             return None
-        
-        parent_id = response.data[0].get('parent_id')
-        if not parent_id:
-            return None
-        
-        return UUID4(parent_id)
+        return UUID4(str(pid))
     
     def get_task_depth_info(
         self,
@@ -1804,27 +1842,30 @@ class TaskService:
         """
         from app.schemas.tasks import TaskDepthResponse
         
-        # First, verify the task exists
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            task_response = supabase.table('tasks').select('id, parent_id, project_id').eq('id', str(task_id)).execute()
-            if not task_response.data or len(task_response.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Task not found"
-                )
-            
-            # Verify task belongs to the project if project_id is provided
-            if project_id and str(task_response.data[0]['project_id']) != str(project_id):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Task does not belong to the specified project"
-                )
-        except HTTPException:
-            raise
+            row = db.execute(
+                select(Task.id, Task.parent_id, Task.project_id).where(Task.id == tid)
+            ).one_or_none()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task: {e}"
+                detail=f"Failed to get task: {e}",
+            )
+        finally:
+            db.close()
+
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found",
+            )
+        _, _parent, t_proj = row
+        if project_id and str(t_proj) != str(project_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Task does not belong to the specified project",
             )
         
         # Calculate depth by traversing up the parent chain

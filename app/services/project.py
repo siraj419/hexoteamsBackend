@@ -1,11 +1,26 @@
-from fastapi import HTTPException, status
-from pydantic import UUID4
-from supabase_auth.errors import AuthApiError
-from typing import Optional, List, Any, Dict
-from datetime import datetime, timezone, date
-from fastapi import UploadFile
+from __future__ import annotations
 
-from app.core import supabase
+import logging
+from datetime import datetime, timezone, date
+from typing import Any, Dict, List, Optional
+from uuid import UUID as StdUUID
+
+from fastapi import HTTPException, UploadFile, status
+from pydantic import UUID4
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
+from app.db.rpc_compat import select_member_projects, select_non_member_projects
+from app.db.sync_session import SyncSessionLocal
+from app.models import (
+    FavouriteProject,
+    Link,
+    OrganizationMember,
+    Profile,
+    Project,
+    Task,
+)
+from app.models.project_member import ProjectMember as ProjectMemberRow
+from app.schemas.activities import ActivityResponse, ActivityType
 from app.schemas.projects import (
     ProjectCreateRequest, ProjectCreateResponse,
     ProjectGetResponse, ProjectUpdateRequest, ProjectUpdateResponse,
@@ -29,16 +44,13 @@ from app.schemas.projects import (
     RecentProjectsResponse,
 )
 from app.schemas.organizations import OrganizationMemberRole
+from app.services.activity import ActivityService
 from app.services.files import FilesService
-from app.services.activity import ActivityService, ActivityType
-from app.services.link import LinkService, LinkEntityType
-from app.utils import random_color, random_icon, calculate_file_size
+from app.services.link import LinkEntityType
+from app.utils import random_color, random_icon
 from app.utils.redis_cache import ProjectSummaryCache, UserCache
-from app.schemas.activities import ActivityResponse
+from app.utils.sa_pagination import apply_sa_limit_offset
 from app.schemas.tasks import TaskStatus
-import logging
-
-from app.core import settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +58,30 @@ class ProjectService:
     def __init__(self):
         self.files_service = FilesService()
         self.activity_service = ActivityService(self.files_service)
-    
+
+    @staticmethod
+    def _parse_view(view_value: Any) -> ProjectTasksView:
+        if isinstance(view_value, str):
+            try:
+                return ProjectTasksView(view_value)
+            except ValueError:
+                return ProjectTasksView.LIST
+        return ProjectTasksView.LIST
+
+    @staticmethod
+    def _project_member_row_to_api(
+        m: ProjectMemberRow,
+        project_id: UUID4,
+    ) -> ProjectMember:
+        return ProjectMember(
+            id=UUID4(str(m.id)),
+            project_id=project_id,
+            user_id=UUID4(str(m.user_id)),
+            role=ProjectMemberRole(m.role),
+            created_at=m.created_at,
+            updated_at=m.updated_at,
+        )
+
     def change_project_avatar(
         self,
         user_id: UUID4,
@@ -54,25 +89,19 @@ class ProjectService:
         file: UploadFile,
         project_id: Optional[UUID4] = None,
     ) -> ProjectChangeAvatarResponse:
-        
+        avatar_file_id = None
         if project_id:
+            db = SyncSessionLocal()
             try:
-                response = supabase.table('projects').select('avatar_file_id').eq('id', project_id).execute()
-            except AuthApiError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to get project: {e}"
-                )
-            
-            if not response.data or len(response.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Project not found"
-                )
-            
-            avatar_file_id = response.data[0]['avatar_file_id']
-        else:
-            avatar_file_id = None
+                row = db.get(Project, StdUUID(str(project_id)))
+                if not row:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Project not found",
+                    )
+                avatar_file_id = row.avatar_file_id
+            finally:
+                db.close()
             
         
         # validate the file
@@ -94,179 +123,229 @@ class ProjectService:
             file_data = self.files_service.upload_file(file, user_id, org_id, project_id)
         
         return ProjectChangeAvatarResponse(
-            avatar_url=self.files_service.get_file_url(file_data['id']),
+            avatar_url=self.files_service.get_file_url(file_data.id),
         )
-    
+
     def archive_project(
         self,
         project_id: UUID4,
     ) -> bool:
-        # archive the project
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').update({
-                'archived': True,
-            }).eq('id', project_id).execute()
+            row = db.get(Project, StdUUID(str(project_id)))
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            row.archived = True
+            row.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        except HTTPException:
+            raise
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to archive project: {e}"
+                detail=f"Failed to archive project: {e}",
             )
-        
+        finally:
+            db.close()
         return True
-    
+
     def restore_project(
         self,
         project_id: UUID4,
     ) -> bool:
-        # restore the project
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').update({
-                'archived': False,
-            }).eq('id', project_id).execute()
+            row = db.get(Project, StdUUID(str(project_id)))
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            row.archived = False
+            row.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        except HTTPException:
+            raise
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to restore project: {e}"
+                detail=f"Failed to restore project: {e}",
             )
-        
+        finally:
+            db.close()
         return True
-    
+
     def toggle_project_favourite(
         self,
         project_id: UUID4,
         user_id: UUID4,
     ) -> bool:
-        
-        # delete if the project is already a favourite
+        pid, uid = StdUUID(str(project_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('favourite_projects').delete().eq('project_id', project_id).eq('user_id', user_id).execute()
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete project from favourites: {e}"
+            res = db.execute(
+                delete(FavouriteProject).where(
+                    FavouriteProject.project_id == pid,
+                    FavouriteProject.user_id == uid,
+                )
             )
-        
-        # add the project to favourites
-        if not response.data or len(response.data) == 0:
+            if res.rowcount and res.rowcount > 0:
+                db.commit()
+                return True
             try:
-                response = supabase.table('favourite_projects').insert({
-                    'project_id': str(project_id),
-                    'user_id': str(user_id),
-                }).execute()
-            except Exception as e:
-                if e.code == '23503': # foreign key violation
+                db.add(FavouriteProject(project_id=pid, user_id=uid))
+                db.commit()
+            except IntegrityError as e:
+                db.rollback()
+                orig = getattr(e.orig, "pgcode", None) or getattr(e, "pgcode", None)
+                if orig == "23503":
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Project or user not found"
+                        detail="Project or user not found",
                     )
-                    
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to add project to favourites: {e}"
+                    detail=f"Failed to add project to favourites: {e}",
                 )
-        
-        
-        return True
+            return True
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to toggle favourite: {e}",
+            )
+        finally:
+            db.close()
     
-    def create_project( 
+    def create_project(
         self,
         project_request: ProjectCreateRequest,
         org_id: str,
         user_id: str,
     ) -> ProjectCreateResponse:
-        
-        # check if the project name is already taken
+        oid = StdUUID(str(org_id))
+        uid = StdUUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            response = (
-                supabase.table('projects')
-                .select('*')
-                .ilike('name', f"%{project_request.name}%")
-                .eq('org_id', str(org_id))
-                .execute()
+            taken = db.scalar(
+                select(func.count())
+                .select_from(Project)
+                .where(
+                    Project.org_id == oid,
+                    Project.name.ilike(f"%{project_request.name}%"),
+                )
             )
+            if taken and taken > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Project name already taken",
+                )
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check if project name is already taken: {e}"
+                detail=f"Failed to check if project name is already taken: {e}",
             )
-        
-        if response.data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Project name already taken"
-            )
-        
+        finally:
+            db.close()
+
         if not project_request.avatar_icon:
             project_request.avatar_icon = random_icon()
         if not project_request.avatar_color:
             project_request.avatar_color = random_color()
-        
-        
-        # create the project
+
+        view_val = (
+            project_request.view.value
+            if project_request.view
+            else ProjectTasksView.LIST.value
+        )
+        now = datetime.now(timezone.utc)
+        row = Project(
+            org_id=oid,
+            name=project_request.name,
+            avatar_color=project_request.avatar_color,
+            avatar_icon=project_request.avatar_icon,
+            avatar_file_id=StdUUID(str(project_request.avatar_file_id))
+            if project_request.avatar_file_id
+            else None,
+            start_date=project_request.start_date,
+            end_date=project_request.end_date,
+            view=view_val,
+            progress_percentage=0,
+            created_by=uid,
+            created_at=now,
+            updated_at=now,
+        )
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').insert({
-                'name': project_request.name,
-                'org_id': str(org_id),
-                'avatar_color': project_request.avatar_color,
-                'avatar_icon': project_request.avatar_icon,
-                'avatar_file_id': str(project_request.avatar_file_id) if project_request.avatar_file_id else None,
-                'start_date': project_request.start_date.isoformat(),
-                'end_date': project_request.end_date.isoformat() if project_request.end_date else None,
-                'view': project_request.view.value if project_request.view else ProjectTasksView.LIST.value,
-                'progress_percentage': 0,
-                'created_by': str(user_id),
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        except AuthApiError as e:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create project: {e}"
+                detail=f"Failed to create project: {e}",
             )
-        
-        
-        # add the project member
-        self._add_project_member(response.data[0]['id'], user_id, ProjectMemberRole.OWNER.value)
-        
-        # update the project avatar file id if provided
+        finally:
+            db.close()
+
+        project_id = UUID4(str(row.id))
+        self._add_project_member(project_id, UUID4(str(user_id)), ProjectMemberRole.OWNER)
+
         if project_request.avatar_file_id:
-            self.files_service.update_file_project_id(project_request.avatar_file_id, response.data[0]['id'])
-        
-        # get the avatar file url if avatar file id is provided
+            self.files_service.update_file_project_id(
+                project_request.avatar_file_id, project_id
+            )
+
         project_avatar_url = None
         if project_request.avatar_file_id:
             project_avatar_url = self.files_service.get_file_url(project_request.avatar_file_id)
-        
-        # Record activity: project created
+
         try:
-            profile_response = supabase.table('profiles').select('display_name').eq('user_id', str(user_id)).execute()
-            if profile_response.data and len(profile_response.data) > 0:
-                user_display_name = profile_response.data[0].get('display_name', 'Unknown')
+            pdb = SyncSessionLocal()
+            try:
+                dn = pdb.scalar(
+                    select(Profile.display_name).where(Profile.user_id == uid)
+                )
+                user_display_name = dn or "Unknown"
                 self.activity_service.add_activity(
                     ActivityType.PROJECT,
-                    UUID4(response.data[0]['id']),
-                    user_id,
-                    f"Project created by {user_display_name}"
+                    project_id,
+                    UUID4(str(user_id)),
+                    f"Project created by {user_display_name}",
                 )
+            finally:
+                pdb.close()
         except Exception as e:
-            logger.error(f"Failed to record project creation activity: {str(e)}", exc_info=True)
-        
-        project_id = UUID4(response.data[0]['id'])
+            logger.error(
+                "Failed to record project creation activity: %s", e, exc_info=True
+            )
+
         members = self._get_project_members(project_id)
-        
+        view = self._parse_view(row.view)
+
         return ProjectCreateResponse(
             id=project_id,
-            name=response.data[0]['name'],
-            org_id=response.data[0]['org_id'],
+            name=row.name,
+            org_id=UUID4(str(row.org_id)),
             avatar_color=project_request.avatar_color,
             avatar_icon=project_request.avatar_icon,
             avatar_url=project_avatar_url,
-            start_date=response.data[0]['start_date'],
-            end_date=response.data[0]['end_date'],
-            view=response.data[0]['view'],
-            progress_percentage=response.data[0]['progress_percentage'],
+            start_date=row.start_date or date.today(),
+            end_date=row.end_date,
+            view=view,
+            progress_percentage=int(row.progress_percentage or 0),
             members=members,
-            favourite_project=self._is_favourite_project(project_id, user_id),
+            favourite_project=self._is_favourite_project(project_id, UUID4(str(user_id))),
         )
         
     def get_projects(
@@ -279,79 +358,72 @@ class ProjectService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> AllProjectsResponse:
-        
-        # get all projects in which the user is a member (using a custom RPC function)
-        query = supabase.rpc('get_member_projects', {
-            'user_id': str(user_id),
-            'org_id': str(org_id),
-        })
-        
-        
-        
-        # filter out archived projects
-        query = query.eq('archived', False)
-        
-        # search for projects by name
-        if search:
-            query = query.ilike('name', f'%{search}%')
-        
-        # order by name or date created
-        if order_by:
-            if order_by == ProjectOrderBy.ALPHABETICAL_ASC:
-                query = query.order('name', desc=False)
-            elif order_by == ProjectOrderBy.ALPHABETICAL_DESC:
-                query = query.order('name', desc=True)
-            elif order_by == ProjectOrderBy.DATE_CREATED_ASC:
-                query = query.order('created_at', desc=False)
-            elif order_by == ProjectOrderBy.DATE_CREATED_DESC:
-                query = query.order('created_at', desc=True)
-        
-        # Optional limit and offset (in case if needed)
-        limit, offset, query = self._apply_pagination(query, limit, offset)
-            
+        oid, uid = StdUUID(str(org_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
+        lim: Optional[int] = None
+        off: Optional[int] = None
         try:
-            response = query.execute()
+            stmt = select_member_projects(db, uid, oid).where(Project.archived.is_(False))
+            if search:
+                stmt = stmt.where(Project.name.ilike(f"%{search}%"))
+            if order_by == ProjectOrderBy.ALPHABETICAL_ASC:
+                stmt = stmt.order_by(Project.name.asc())
+            elif order_by == ProjectOrderBy.ALPHABETICAL_DESC:
+                stmt = stmt.order_by(Project.name.desc())
+            elif order_by == ProjectOrderBy.DATE_CREATED_ASC:
+                stmt = stmt.order_by(Project.created_at.asc())
+            elif order_by == ProjectOrderBy.DATE_CREATED_DESC:
+                stmt = stmt.order_by(Project.created_at.desc())
+            else:
+                stmt = stmt.order_by(Project.created_at.desc())
+
+            lim, off, page_stmt = apply_sa_limit_offset(stmt, limit, offset)
+            rows = list(db.scalars(page_stmt).all())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get projects: {e}"
+                detail=f"Failed to get projects: {e}",
             )
-        
+        finally:
+            db.close()
+
         projects = []
-        for project in response.data:
-            avatar_url = None
-            if project['avatar_file_id']:
-                avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
-            
-            project_id = UUID4(project['id'])
+        for project in rows:
+            avatar_url = (
+                self.files_service.get_file_url(project.avatar_file_id)
+                if project.avatar_file_id
+                else None
+            )
+            project_id = UUID4(str(project.id))
             members = self._get_project_members(project_id)
-                
+            view = self._parse_view(project.view)
             projects.append(
                 ProjectGetResponse(
                     id=project_id,
-                    name=project['name'],
-                    org_id=project['org_id'],
-                    avatar_color=project['avatar_color'],
-                    avatar_icon=project['avatar_icon'],
+                    name=project.name,
+                    org_id=UUID4(str(project.org_id)),
+                    avatar_color=project.avatar_color,
+                    avatar_icon=project.avatar_icon,
                     avatar_url=avatar_url,
-                    start_date=project['start_date'],
-                    end_date=project['end_date'],
-                    view=project['view'],
-                    progress_percentage=project['progress_percentage'],
+                    start_date=project.start_date or date.today(),
+                    end_date=project.end_date,
+                    view=view,
+                    progress_percentage=int(project.progress_percentage or 0),
                     members=members,
                     favourite_project=self._is_favourite_project(project_id, user_id),
                 )
             )
-        
-        # get non-member projects count
-        non_member_projects_count = self._get_non_member_projects_count(org_member_role, org_id, user_id)
-        
+
+        non_member_projects_count = self._get_non_member_projects_count(
+            org_member_role, org_id, user_id
+        )
+
         return AllProjectsResponse(
             member_projects=projects,
             non_member_projects_count=non_member_projects_count,
             total=len(projects),
-            offset=offset,
-            limit=limit,
+            offset=off,
+            limit=lim,
         )
     
     def get_archived_projects(
@@ -361,48 +433,58 @@ class ProjectService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> ArchivedProjectsResponse:
-        # get all archived projects
-        query = supabase.table('projects').select('*').eq('org_id', org_id).eq('archived', True)
-        
-        # apply pagination
-        limit, offset, query = self._apply_pagination(query, limit, offset)
-        
+        oid = StdUUID(str(org_id))
+        db = SyncSessionLocal()
+        lim: Optional[int] = None
+        off: Optional[int] = None
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            stmt = (
+                select(Project)
+                .where(Project.org_id == oid, Project.archived.is_(True))
+                .order_by(Project.created_at.desc())
+            )
+            lim, off, page_stmt = apply_sa_limit_offset(stmt, limit, offset)
+            rows = list(db.scalars(page_stmt).all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get archived projects: {e}"
+                detail=f"Failed to get archived projects: {e}",
             )
-        
+        finally:
+            db.close()
+
         projects = []
-        for project in response.data:
-            avatar_url = None
-            if project['avatar_file_id']:
-                avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
-            
-            project_id = UUID4(project['id'])
+        for project in rows:
+            avatar_url = (
+                self.files_service.get_file_url(project.avatar_file_id)
+                if project.avatar_file_id
+                else None
+            )
+            project_id = UUID4(str(project.id))
             members = self._get_project_members(project_id)
-            
-            projects.append(ProjectGetResponse(
-                id=project_id,
-                name=project['name'],
-                org_id=project['org_id'],
-                avatar_color=project['avatar_color'],
-                avatar_icon=project['avatar_icon'],
-                avatar_url=avatar_url,
-                start_date=project['start_date'],
-                end_date=project['end_date'],
-                view=project['view'],
-                progress_percentage=project['progress_percentage'],
-                members=members,
-            ))
-        
+            view = self._parse_view(project.view)
+            projects.append(
+                ProjectGetResponse(
+                    id=project_id,
+                    name=project.name,
+                    org_id=UUID4(str(project.org_id)),
+                    avatar_color=project.avatar_color,
+                    avatar_icon=project.avatar_icon,
+                    avatar_url=avatar_url,
+                    start_date=project.start_date or date.today(),
+                    end_date=project.end_date,
+                    view=view,
+                    progress_percentage=int(project.progress_percentage or 0),
+                    members=members,
+                    archived=True,
+                )
+            )
+
         return ArchivedProjectsResponse(
             projects=projects,
             total=len(projects),
-            offset=offset,
-            limit=limit,
+            offset=off,
+            limit=lim,
         )
     
     def get_non_member_projects(
@@ -412,54 +494,57 @@ class ProjectService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> NonMemberProjectsResponse:
-        # get all projects in which the user is not a member (using a custom RPC function)
-        query = supabase.rpc('get_non_member_projects', {
-            'org_id': org_id,
-            'user_id': user_id,
-        })
-        
-        # filter out archived projects
-        query = query.eq('archived', False)
-        
-        # apply pagination
-        limit, offset, query = self._apply_pagination(query, limit, offset)
-        
+        oid, uid = StdUUID(str(org_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
+        lim: Optional[int] = None
+        off: Optional[int] = None
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            stmt = (
+                select_non_member_projects(db, oid, uid)
+                .where(Project.archived.is_(False))
+                .order_by(Project.created_at.desc())
+            )
+            lim, off, page_stmt = apply_sa_limit_offset(stmt, limit, offset)
+            rows = list(db.scalars(page_stmt).all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get non-member projects: {e}"
+                detail=f"Failed to get non-member projects: {e}",
             )
-        
+        finally:
+            db.close()
+
         projects = []
-        for project in response.data:
-            avatar_url = None
-            if project['avatar_file_id']:
-                avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
-            
-            project_id = UUID4(project['id'])
+        for project in rows:
+            avatar_url = (
+                self.files_service.get_file_url(project.avatar_file_id)
+                if project.avatar_file_id
+                else None
+            )
+            project_id = UUID4(str(project.id))
             members = self._get_project_members(project_id)
-            
-            projects.append(ProjectGetResponse(
-                id=project_id,
-                name=project['name'],
-                org_id=project['org_id'],
-                avatar_color=project['avatar_color'],
-                avatar_icon=project['avatar_icon'],
-                avatar_url=avatar_url,
-                start_date=project['start_date'],
-                end_date=project['end_date'],
-                view=project['view'],
-                progress_percentage=project['progress_percentage'],
-                members=members,
-            ))
-        
+            view = self._parse_view(project.view)
+            projects.append(
+                ProjectGetResponse(
+                    id=project_id,
+                    name=project.name,
+                    org_id=UUID4(str(project.org_id)),
+                    avatar_color=project.avatar_color,
+                    avatar_icon=project.avatar_icon,
+                    avatar_url=avatar_url,
+                    start_date=project.start_date or date.today(),
+                    end_date=project.end_date,
+                    view=view,
+                    progress_percentage=int(project.progress_percentage or 0),
+                    members=members,
+                )
+            )
+
         return NonMemberProjectsResponse(
             projects=projects,
             total=len(projects),
-            offset=offset,
-            limit=limit,
+            offset=off,
+            limit=lim,
         )
     
     
@@ -468,49 +553,41 @@ class ProjectService:
         project_id: UUID4,
         user_id: Optional[UUID4] = None,
     ) -> ProjectGetResponse:
+        pid = StdUUID(str(project_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').select('*').eq('id', project_id).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get project: {e}"
-            )
-            
-        if not response.data or len(response.data) == 0:
+            row = db.get(Project, pid)
+        finally:
+            db.close()
+
+        if not row:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found"
+                detail="Project not found",
             )
-            
-        avatar_url = None
-        if response.data[0].get('avatar_file_id'):
-            avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
-        
+
+        avatar_url = (
+            self.files_service.get_file_url(row.avatar_file_id)
+            if row.avatar_file_id
+            else None
+        )
         members = self._get_project_members(project_id)
-        
-        view_value = response.data[0].get('view', ProjectTasksView.LIST.value)
-        if isinstance(view_value, str):
-            try:
-                view = ProjectTasksView(view_value)
-            except ValueError:
-                view = ProjectTasksView.LIST
-        else:
-            view = ProjectTasksView.LIST
-        
+        view = self._parse_view(row.view)
+
         return ProjectGetResponse(
-            id=UUID4(response.data[0]['id']),
-            name=response.data[0]['name'],
-            org_id=UUID4(response.data[0]['org_id']),
-            avatar_color=response.data[0].get('avatar_color'),
-            avatar_icon=response.data[0].get('avatar_icon'),
+            id=UUID4(str(row.id)),
+            name=row.name,
+            org_id=UUID4(str(row.org_id)),
+            avatar_color=row.avatar_color,
+            avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
-            start_date=response.data[0]['start_date'],
-            end_date=response.data[0].get('end_date'),
+            start_date=row.start_date or date.today(),
+            end_date=row.end_date,
             view=view,
-            progress_percentage=response.data[0].get('progress_percentage', 0),
+            progress_percentage=int(row.progress_percentage or 0),
             members=members,
             favourite_project=self._is_favourite_project(project_id, user_id),
-            archived=response.data[0].get('archived', False),
+            archived=bool(row.archived),
         )
     
     def get_project_summary(
@@ -532,39 +609,36 @@ class ProjectService:
             try:
                 # Ensure project info exists and has favourite_project field
                 if not cached_summary.get('project'):
-                    # Fetch project info and add to cached summary
-                    project_response = supabase.table('projects').select('*').eq('id', project_id_str).execute()
-                    if project_response.data and len(project_response.data) > 0:
-                        project_data = project_response.data[0]
-                        avatar_url = None
-                        if project_data.get('avatar_file_id'):
-                            avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
-                        
-                        view_value = project_data.get('view', ProjectTasksView.LIST.value)
-                        if isinstance(view_value, str):
-                            try:
-                                view = ProjectTasksView(view_value)
-                            except ValueError:
-                                view = ProjectTasksView.LIST
-                        else:
-                            view = ProjectTasksView.LIST
-                        
-                        project_info = ProjectResponse(
-                            id=UUID4(project_data['id']),
-                            name=project_data['name'],
-                            org_id=UUID4(project_data['org_id']),
-                            avatar_color=project_data.get('avatar_color'),
-                            avatar_icon=project_data.get('avatar_icon'),
-                            avatar_url=avatar_url,
-                            start_date=project_data['start_date'],
-                            end_date=project_data.get('end_date'),
-                            view=view,
-                            progress_percentage=project_data.get('progress_percentage', 0),
-                            members=cached_summary.get('members', []),
-                            favourite_project=self._is_favourite_project(UUID4(project_data['id']), user_id),
-                            archived=project_data.get('archived', False),
+                    pdb = SyncSessionLocal()
+                    try:
+                        prow = pdb.get(Project, StdUUID(project_id_str))
+                    finally:
+                        pdb.close()
+                    if prow:
+                        avatar_url = (
+                            self.files_service.get_file_url(prow.avatar_file_id)
+                            if prow.avatar_file_id
+                            else None
                         )
-                        cached_summary['project'] = project_info.model_dump(mode='json')
+                        view = self._parse_view(prow.view)
+                        project_info = ProjectResponse(
+                            id=UUID4(str(prow.id)),
+                            name=prow.name,
+                            org_id=UUID4(str(prow.org_id)),
+                            avatar_color=prow.avatar_color,
+                            avatar_icon=prow.avatar_icon,
+                            avatar_url=avatar_url,
+                            start_date=prow.start_date or date.today(),
+                            end_date=prow.end_date,
+                            view=view,
+                            progress_percentage=int(prow.progress_percentage or 0),
+                            members=cached_summary.get("members", []),
+                            favourite_project=self._is_favourite_project(
+                                UUID4(str(prow.id)), user_id
+                            ),
+                            archived=bool(prow.archived),
+                        )
+                        cached_summary["project"] = project_info.model_dump(mode="json")
                 else:
                     # Update cached project with favourite_project field if missing or invalid
                     cached_project = cached_summary.get('project', {})
@@ -581,199 +655,194 @@ class ProjectService:
         
         # Cache miss - fetch all data
         try:
-            # 0. Get project basic information
-            project_response = supabase.table('projects').select('*').eq('id', project_id_str).execute()
-            if not project_response.data or len(project_response.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Project not found"
+            pid = StdUUID(project_id_str)
+            member_rows: List[Any] = []
+            link_rows: List[Any] = []
+            task_rows: List[Any] = []
+            db = SyncSessionLocal()
+            try:
+                project_data_row = db.get(Project, pid)
+                if not project_data_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Project not found",
+                    )
+
+                avatar_url = (
+                    self.files_service.get_file_url(project_data_row.avatar_file_id)
+                    if project_data_row.avatar_file_id
+                    else None
                 )
-            
-            project_data = project_response.data[0]
-            avatar_url = None
-            if project_data.get('avatar_file_id'):
-                avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
-            
-            view_value = project_data.get('view', ProjectTasksView.LIST.value)
-            if isinstance(view_value, str):
-                try:
-                    view = ProjectTasksView(view_value)
-                except ValueError:
-                    view = ProjectTasksView.LIST
-            else:
-                view = ProjectTasksView.LIST
-            
-            project_info = ProjectResponse(
-                id=UUID4(project_data['id']),
-                name=project_data['name'],
-                org_id=UUID4(project_data['org_id']),
-                avatar_color=project_data.get('avatar_color'),
-                avatar_icon=project_data.get('avatar_icon'),
-                avatar_url=avatar_url,
-                start_date=project_data['start_date'],
-                end_date=project_data.get('end_date'),
-                view=view,
-                progress_percentage=project_data.get('progress_percentage', 0),
-                members=[],  # Will be populated below
-                favourite_project=self._is_favourite_project(project_id, user_id),
-                archived=project_data.get('archived', False),
-            )
-            
-            # 1. Get project members with user info (handle duplicates)
-            members_response = supabase.table('project_members').select(
-                'user_id, role'
-            ).eq('project_id', project_id_str).execute()
-            
+                view = self._parse_view(project_data_row.view)
+
+                project_info = ProjectResponse(
+                    id=UUID4(str(project_data_row.id)),
+                    name=project_data_row.name,
+                    org_id=UUID4(str(project_data_row.org_id)),
+                    avatar_color=project_data_row.avatar_color,
+                    avatar_icon=project_data_row.avatar_icon,
+                    avatar_url=avatar_url,
+                    start_date=project_data_row.start_date or date.today(),
+                    end_date=project_data_row.end_date,
+                    view=view,
+                    progress_percentage=int(project_data_row.progress_percentage or 0),
+                    members=[],
+                    favourite_project=self._is_favourite_project(project_id, user_id),
+                    archived=bool(project_data_row.archived),
+                )
+
+                member_rows = db.execute(
+                    select(ProjectMemberRow.user_id, ProjectMemberRow.role).where(
+                        ProjectMemberRow.project_id == pid
+                    )
+                ).all()
+
+                link_rows = list(
+                    db.scalars(
+                        select(Link)
+                        .where(
+                            Link.entity_id == pid,
+                            Link.entity_type == LinkEntityType.PROJECT.value,
+                        )
+                        .order_by(Link.created_at.desc())
+                        .limit(5)
+                    ).all()
+                )
+
+                task_rows = list(
+                    db.scalars(
+                        select(Task).where(
+                            Task.project_id == pid,
+                            Task.parent_id.is_(None),
+                        )
+                    ).all()
+                )
+
+            finally:
+                db.close()
+
             members = []
             seen_user_ids = set()
-            if members_response.data:
-                # Create a map of user_id to role
-                user_role_map = {UUID4(member['user_id']): member.get('role') for member in members_response.data}
-                user_ids = list(user_role_map.keys())
-                
-                # Collect all unique user IDs for batch fetching
+            if member_rows:
+                user_role_map = {
+                    UUID4(str(uid)): role for uid, role in member_rows
+                }
+                pm_user_ids = list(user_role_map.keys())
+
                 unique_user_ids = []
-                for user_id in user_ids:
-                    user_id_str = str(user_id)
-                    if user_id_str not in seen_user_ids:
-                        seen_user_ids.add(user_id_str)
-                        unique_user_ids.append(user_id)
-                
-                # Batch fetch all user info
+                for pm_uid in pm_user_ids:
+                    pm_uid_str = str(pm_uid)
+                    if pm_uid_str not in seen_user_ids:
+                        seen_user_ids.add(pm_uid_str)
+                        unique_user_ids.append(pm_uid)
+
                 user_info_cache = {}
                 if unique_user_ids:
                     user_info_cache = self._batch_get_user_info(unique_user_ids)
-                
-                # Build members list using batch-fetched data
-                for user_id in unique_user_ids:
-                    user_id_str = str(user_id)
-                    user_info = user_info_cache.get(user_id_str) or {
-                        'id': user_id_str,
-                        'display_name': None,
-                        'avatar_url': None
+
+                for pm_uid in unique_user_ids:
+                    pm_uid_str = str(pm_uid)
+                    user_info = user_info_cache.get(pm_uid_str) or {
+                        "id": pm_uid_str,
+                        "display_name": None,
+                        "avatar_url": None,
                     }
-                    role = user_role_map.get(user_id)
-                    members.append(ProjectMemberSummary(
-                        id=user_id,
-                        display_name=user_info.get('display_name'),
-                        avatar_url=user_info.get('avatar_url'),
-                        role=ProjectMemberRole(role) if role else None
-                    ))
+                    role = user_role_map.get(pm_uid)
+                    members.append(
+                        ProjectMemberSummary(
+                            id=pm_uid,
+                            display_name=user_info.get("display_name"),
+                            avatar_url=user_info.get("avatar_url"),
+                            role=ProjectMemberRole(role) if role else None,
+                        )
+                    )
             
             # Update project_info with members
             project_info.members = members
             
-            # 2. Get top 5 latest project links
+            latest_links = []
             try:
-                links_response = supabase.table('links').select(
-                    'id, title, link_url, created_at'
-                ).eq('entity_id', project_id_str).eq('entity_type', LinkEntityType.PROJECT.value).order(
-                    'created_at', desc=True
-                ).limit(5).execute()
-                
-                latest_links = []
-                if links_response.data:
-                    for link_data in links_response.data:
-                        try:
-                            created_at_str = link_data.get('created_at')
-                            if created_at_str:
-                                if isinstance(created_at_str, str):
-                                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                                    if created_at.tzinfo is None:
-                                        created_at = created_at.replace(tzinfo=timezone.utc)
-                                else:
-                                    created_at = datetime.now(timezone.utc)
-                            else:
-                                created_at = datetime.now(timezone.utc)
-                        except Exception as e:
-                            logger.warning(f"Failed to parse link created_at: {e}")
-                            created_at = datetime.now(timezone.utc)
-                        
-                        latest_links.append(ProjectLinkSummary(
-                            id=UUID4(link_data['id']),
-                            title=link_data.get('title'),
-                            link_url=str(link_data.get('link_url', '')),
-                            created_at=created_at
-                        ))
+                for lk in link_rows:
+                    created_at = lk.created_at or datetime.now(timezone.utc)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    latest_links.append(
+                        ProjectLinkSummary(
+                            id=UUID4(str(lk.id)),
+                            title=lk.title,
+                            link_url=str(lk.link_url or ""),
+                            created_at=created_at,
+                        )
+                    )
             except Exception as e:
-                logger.error(f"Failed to get project links: {str(e)}")
+                logger.error("Failed to build project links: %s", e)
                 latest_links = []
-            
-            # 4. Get task summary
+
             now = datetime.now(timezone.utc)
-            tasks_response = supabase.table('tasks').select(
-                'id, status, due_date, assignee_id'
-            ).eq('project_id', project_id_str).is_('parent_id', 'null').execute()
-            
             completed = 0
             incomplete = 0
             overdue = 0
-            
-            if tasks_response.data:
-                for task in tasks_response.data:
-                    task_status = task.get('status')
-                    due_date = task.get('due_date')
-                    
-                    if task_status == TaskStatus.COMPLETED.value:
-                        completed += 1
-                    else:
-                        incomplete += 1
-                        if due_date:
-                            try:
-                                due_dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
-                                if due_dt.tzinfo is None:
-                                    due_dt = due_dt.replace(tzinfo=timezone.utc)
-                                if due_dt < now:
-                                    overdue += 1
-                            except:
-                                pass
-            
+
+            for t in task_rows:
+                task_status = t.status
+                due_date = t.due_date
+                if task_status == TaskStatus.COMPLETED.value:
+                    completed += 1
+                else:
+                    incomplete += 1
+                    if due_date:
+                        due_dt = due_date
+                        if due_dt.tzinfo is None:
+                            due_dt = due_dt.replace(tzinfo=timezone.utc)
+                        if due_dt < now:
+                            overdue += 1
+
             task_summary = TaskSummary(
                 completed=completed,
                 incomplete=incomplete,
-                overdue=overdue
+                overdue=overdue,
             )
-            
-            # 5. Get team workload
-            total_tasks = len(tasks_response.data) if tasks_response.data else 0
-            assigned_tasks = sum(1 for task in tasks_response.data if task.get('assignee_id')) if tasks_response.data else 0
+
+            total_tasks = len(task_rows)
+            assigned_tasks = sum(1 for t in task_rows if t.assignee_id)
             unassigned_tasks = total_tasks - assigned_tasks
-            
-            assigned_percentage = (assigned_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
-            unassigned_percentage = (unassigned_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
-            
-            # Count tasks per user
-            user_task_counts = {}
-            if tasks_response.data:
-                for task in tasks_response.data:
-                    assignee_id = task.get('assignee_id')
-                    if assignee_id:
-                        user_task_counts[assignee_id] = user_task_counts.get(assignee_id, 0) + 1
-            
+
+            assigned_percentage = (
+                (assigned_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
+            )
+            unassigned_percentage = (
+                (unassigned_tasks / total_tasks * 100) if total_tasks > 0 else 0.0
+            )
+
+            user_task_counts: Dict[str, int] = {}
+            for t in task_rows:
+                if t.assignee_id:
+                    aid = str(t.assignee_id)
+                    user_task_counts[aid] = user_task_counts.get(aid, 0) + 1
+
             user_workloads = []
             if user_task_counts:
-                # Collect all user IDs for batch fetching
-                user_ids = [UUID4(user_id_str) for user_id_str in user_task_counts.keys()]
-                
-                # Batch fetch all user info
-                user_info_cache = self._batch_get_user_info(user_ids)
-                
-                # Build workloads using batch-fetched data
-                for user_id_str, task_count in user_task_counts.items():
-                    user_id = UUID4(user_id_str)
-                    user_info = user_info_cache.get(user_id_str) or {
-                        'id': user_id_str,
-                        'display_name': None,
-                        'avatar_url': None
+                wl_uids = [UUID4(x) for x in user_task_counts.keys()]
+                user_info_cache = self._batch_get_user_info(wl_uids)
+                for assignee_key, task_count in user_task_counts.items():
+                    wl_uid = UUID4(assignee_key)
+                    user_info = user_info_cache.get(assignee_key) or {
+                        "id": assignee_key,
+                        "display_name": None,
+                        "avatar_url": None,
                     }
-                    percentage = (task_count / total_tasks * 100) if total_tasks > 0 else 0.0
-                    user_workloads.append(UserWorkload(
-                        user_id=user_id,
-                        display_name=user_info.get('display_name'),
-                        avatar_url=user_info.get('avatar_url'),
-                        task_count=task_count,
-                        percentage=round(percentage, 2)
-                    ))
+                    percentage = (
+                        (task_count / total_tasks * 100) if total_tasks > 0 else 0.0
+                    )
+                    user_workloads.append(
+                        UserWorkload(
+                            user_id=wl_uid,
+                            display_name=user_info.get("display_name"),
+                            avatar_url=user_info.get("avatar_url"),
+                            task_count=task_count,
+                            percentage=round(percentage, 2),
+                        )
+                    )
             
             team_workload = TeamWorkload(
                 assigned_percentage=round(assigned_percentage, 2),
@@ -816,12 +885,14 @@ class ProjectService:
                 logger.warning(f"Failed to cache project summary: {e}")
             
             return summary
-            
+
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Error getting project summary: {str(e)}")
+            logger.error("Error getting project summary: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get project summary: {str(e)}"
+                detail=f"Failed to get project summary: {e!s}",
             )
     
     def _get_user_info_with_cache(self, user_id: UUID4) -> Dict[str, Any]:
@@ -849,42 +920,46 @@ class ProjectService:
                     'avatar_url': avatar_url
                 }
             
-            # Cache miss - fetch from database
-            user_response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').eq(
-                'user_id', user_id_str
-            ).execute()
-            
-            if user_response.data and len(user_response.data) > 0:
-                user = user_response.data[0]
-                
+            pdb = SyncSessionLocal()
+            try:
+                prow = pdb.execute(
+                    select(
+                        Profile.user_id,
+                        Profile.display_name,
+                        Profile.email,
+                        Profile.avatar_file_id,
+                    ).where(Profile.user_id == StdUUID(user_id_str))
+                ).one_or_none()
+            finally:
+                pdb.close()
+
+            if prow:
+                uid, display_name, email, avatar_file_id = prow
                 avatar_url = None
-                if user.get('avatar_file_id'):
+                if avatar_file_id:
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
                     except Exception as e:
-                        logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
-                
-                # Standardize on 'id' key for consistency across services (include email)
+                        logger.warning(
+                            "Failed to get avatar URL for user %s: %s", user_id_str, e
+                        )
                 user_data_for_cache = {
-                    'id': user['user_id'],
-                    'display_name': user.get('display_name'),
-                    'email': user.get('email'),
-                    'avatar_file_id': user.get('avatar_file_id')
+                    "id": str(uid),
+                    "display_name": display_name,
+                    "email": email,
+                    "avatar_file_id": str(avatar_file_id) if avatar_file_id else None,
                 }
-                
                 UserCache.set_user(user_id_str, user_data_for_cache)
-                
                 return {
-                    'id': user['user_id'],
-                    'display_name': user.get('display_name'),
-                    'avatar_url': avatar_url
+                    "id": str(uid),
+                    "display_name": display_name,
+                    "avatar_url": avatar_url,
                 }
-            else:
-                return {
-                    'id': user_id_str,
-                    'display_name': None,
-                    'avatar_url': None
-                }
+            return {
+                "id": user_id_str,
+                "display_name": None,
+                "avatar_url": None,
+            }
                 
         except Exception as e:
             logger.error(f"Error getting user info for {user_id_str}: {str(e)}")
@@ -935,58 +1010,64 @@ class ProjectService:
                 logger.warning(f"Error getting user {user_id_str} from cache: {e}")
                 user_ids_to_fetch.append(user_id_str)
         
-        # Batch fetch missing users from database
         if user_ids_to_fetch:
             try:
-                user_response = supabase.table('profiles').select(
-                    'user_id, display_name, email, avatar_file_id'
-                ).in_('user_id', user_ids_to_fetch).execute()
-                
-                if user_response.data:
-                    for user in user_response.data:
-                        user_id_str = user['user_id']
-                        
-                        avatar_url = None
-                        if user.get('avatar_file_id'):
-                            try:
-                                avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
-                            except Exception as e:
-                                logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
-                        
-                        # Standardize on 'id' key for consistency across services (include email)
-                        user_data_for_cache = {
-                            'id': user['user_id'],
-                            'display_name': user.get('display_name'),
-                            'email': user.get('email'),
-                            'avatar_file_id': user.get('avatar_file_id')
+                uuids = [StdUUID(x) for x in user_ids_to_fetch]
+                pdb = SyncSessionLocal()
+                try:
+                    rows = pdb.execute(
+                        select(
+                            Profile.user_id,
+                            Profile.display_name,
+                            Profile.email,
+                            Profile.avatar_file_id,
+                        ).where(Profile.user_id.in_(uuids))
+                    ).all()
+                finally:
+                    pdb.close()
+
+                for row in rows:
+                    uid, display_name, email, avatar_file_id = row
+                    uid_str = str(uid)
+                    avatar_url = None
+                    if avatar_file_id:
+                        try:
+                            avatar_url = self.files_service.get_file_url(
+                                UUID4(str(avatar_file_id))
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to get avatar URL for user %s: %s", uid_str, e
+                            )
+                    user_data_for_cache = {
+                        "id": uid_str,
+                        "display_name": display_name,
+                        "email": email,
+                        "avatar_file_id": str(avatar_file_id) if avatar_file_id else None,
+                    }
+                    UserCache.set_user(uid_str, user_data_for_cache)
+                    result[uid_str] = {
+                        "id": uid_str,
+                        "display_name": display_name,
+                        "avatar_url": avatar_url,
+                    }
+
+                for uid_str in user_ids_to_fetch:
+                    if uid_str not in result:
+                        result[uid_str] = {
+                            "id": uid_str,
+                            "display_name": None,
+                            "avatar_url": None,
                         }
-                        
-                        UserCache.set_user(user_id_str, user_data_for_cache)
-                        
-                        result[user_id_str] = {
-                            'id': user['user_id'],
-                            'display_name': user.get('display_name'),
-                            'avatar_url': avatar_url
-                        }
-                
-                # Set default for users not found in database
-                for user_id_str in user_ids_to_fetch:
-                    if user_id_str not in result:
-                        result[user_id_str] = {
-                            'id': user_id_str,
-                            'display_name': None,
-                            'avatar_url': None
-                        }
-                        
+
             except Exception as e:
-                logger.error(f"Error batch fetching user info: {str(e)}")
-                # Set default for all failed fetches
-                for user_id_str in user_ids_to_fetch:
-                    if user_id_str not in result:
-                        result[user_id_str] = {
-                            'id': user_id_str,
-                            'display_name': None,
-                            'avatar_url': None
+                logger.error("Error batch fetching user info: %s", e)
+                for uid_str in user_ids_to_fetch:
+                    if uid_str not in result:
+                        result[uid_str] = {
+                            "id": uid_str,
+                            "display_name": None,
+                            "avatar_url": None,
                         }
         
         return result
@@ -1004,16 +1085,22 @@ class ProjectService:
         """
         if not user_id:
             return False
-        
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('favourite_projects').select('id').eq('project_id', str(project_id)).eq('user_id', str(user_id)).execute()
-            # Ensure we always return a boolean, not a list
-            if response.data and isinstance(response.data, list) and len(response.data) > 0:
-                return True
-            return False
+            n = db.scalar(
+                select(func.count())
+                .select_from(FavouriteProject)
+                .where(
+                    FavouriteProject.project_id == StdUUID(str(project_id)),
+                    FavouriteProject.user_id == StdUUID(str(user_id)),
+                )
+            )
+            return bool(n and n > 0)
         except Exception as e:
-            logger.warning(f"Error checking favourite project: {e}")
+            logger.warning("Error checking favourite project: %s", e)
             return False
+        finally:
+            db.close()
     
     def _get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
         """
@@ -1022,26 +1109,36 @@ class ProjectService:
         """
         project_id_str = str(project_id)
         members = []
-        
+
         try:
-            members_response = supabase.table('project_members').select(
-                'user_id, role'
-            ).eq('project_id', project_id_str).execute()
-            
-            if members_response.data:
-                for member_data in members_response.data:
-                    user_id = UUID4(member_data['user_id'])
-                    role = member_data.get('role')
-                    user_info = self._get_user_info_with_cache(user_id)
-                    members.append(ProjectMemberSummary(
-                        id=user_id,
-                        display_name=user_info.get('display_name'),
-                        avatar_url=user_info.get('avatar_url'),
-                        role=ProjectMemberRole(role) if role else None
-                    ))
+            db = SyncSessionLocal()
+            try:
+                rows = db.execute(
+                    select(ProjectMemberRow.user_id, ProjectMemberRow.role).where(
+                        ProjectMemberRow.project_id == StdUUID(project_id_str)
+                    )
+                ).all()
+            finally:
+                db.close()
+
+            for uid, role in rows:
+                m_uid = UUID4(str(uid))
+                user_info = self._get_user_info_with_cache(m_uid)
+                members.append(
+                    ProjectMemberSummary(
+                        id=m_uid,
+                        display_name=user_info.get("display_name"),
+                        avatar_url=user_info.get("avatar_url"),
+                        role=ProjectMemberRole(role) if role else None,
+                    )
+                )
         except Exception as e:
-            logger.error(f"Error getting project members for project {project_id_str}: {str(e)}")
-        
+            logger.error(
+                "Error getting project members for project %s: %s",
+                project_id_str,
+                e,
+            )
+
         return members
     
     def get_project_members(self, project_id: UUID4) -> List[ProjectMemberSummary]:
@@ -1053,61 +1150,66 @@ class ProjectService:
     
     def delete_project(
         self,
-        project_id: UUID4
+        project_id: UUID4,
     ) -> bool:
-        
+        pid = StdUUID(str(project_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').select('archived').eq('id', project_id).execute()
-            if not response.data or len(response.data) == 0:
+            row = db.get(Project, pid)
+            if not row:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Project not found"
+                    detail="Project not found",
                 )
-            is_archived = response.data[0].get('archived', False)
+            if not row.archived:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Project is not archived, cannot delete unarchived projects",
+                )
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check if project is archived: {e}"
+                detail=f"Failed to check if project is archived: {e}",
             )
-        
-        if not is_archived:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Project is not archived, cannot delete unarchived projects"
-            )
-        
-        # Delete project attachments from database only (not from S3)
+        finally:
+            db.close()
+
         from app.services.attachment import AttachmentService, AttachmentType
+
         attachment_service = AttachmentService(self.files_service)
         try:
             attachment_service.delete_all(project_id, AttachmentType.PROJECT)
         except Exception as e:
-            logger.warning(f"Failed to delete project attachments: {e}")
-            # Continue with project deletion even if attachment deletion fails
-        
-        # Delete project file records from database only (not from S3)
+            logger.warning("Failed to delete project attachments: %s", e)
+
         try:
             self.files_service.delete_permanently_all_files_by_project_id(project_id)
         except Exception as e:
-            logger.warning(f"Failed to delete project files: {e}")
-            # Continue with project deletion even if file deletion fails
-        
+            logger.warning("Failed to delete project files: %s", e)
+
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').delete().eq('id', project_id).execute()
+            row = db.get(Project, pid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            db.delete(row)
+            db.commit()
+        except HTTPException:
+            raise
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete project: {e}"
+                detail=f"Failed to delete project: {e}",
             )
-    
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found"
-            )
-            
+        finally:
+            db.close()
+
         return True
     
     def update_project(
@@ -1116,56 +1218,60 @@ class ProjectService:
         project_request: ProjectUpdateRequest,
         user_id: Optional[UUID4] = None,
     ) -> ProjectUpdateResponse:
-        
-        updates = {}
-        if project_request.name:
-            updates['name'] = project_request.name
-        if project_request.avatar_color:
-            updates['avatar_color'] = project_request.avatar_color
-        if project_request.avatar_icon:
-            updates['avatar_icon'] = project_request.avatar_icon
-        if project_request.avatar_file_id:
-            updates['avatar_file_id'] = project_request.avatar_file_id
-        if project_request.start_date:
-            updates['start_date'] = project_request.start_date
-        if project_request.end_date:
-            updates['end_date'] = project_request.end_date
-        if project_request.view:
-            updates['view'] = project_request.view
-        updates['updated_at'] = datetime.now(timezone.utc)
-        
+        pid = StdUUID(str(project_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').update(updates).eq('id', project_id).execute()
-        except AuthApiError as e:
+            row = db.get(Project, pid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            if project_request.name is not None:
+                row.name = project_request.name
+            if project_request.avatar_color is not None:
+                row.avatar_color = project_request.avatar_color
+            if project_request.avatar_icon is not None:
+                row.avatar_icon = project_request.avatar_icon
+            if project_request.start_date is not None:
+                row.start_date = project_request.start_date
+            if project_request.end_date is not None:
+                row.end_date = project_request.end_date
+            if project_request.view is not None:
+                row.view = project_request.view.value
+            row.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update project: {e}"
+                detail=f"Failed to update project: {e}",
             )
-            
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found"
-            )
-            
-        avatar_url = None
-        if response.data[0]['avatar_file_id']:
-            avatar_url = self.files_service.get_file_url(response.data[0]['avatar_file_id'])
-            
+        finally:
+            db.close()
+
+        avatar_url = (
+            self.files_service.get_file_url(row.avatar_file_id)
+            if row.avatar_file_id
+            else None
+        )
         return ProjectUpdateResponse(
-            id=response.data[0]['id'],
-            name=response.data[0]['name'],
-            org_id=response.data[0]['org_id'],
-            avatar_color=response.data[0]['avatar_color'],
-            avatar_icon=response.data[0]['avatar_icon'],
+            id=UUID4(str(row.id)),
+            name=row.name,
+            org_id=UUID4(str(row.org_id)),
+            avatar_color=row.avatar_color,
+            avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
-            start_date=response.data[0]['start_date'],
-            end_date=response.data[0]['end_date'],
-            view=response.data[0]['view'],
-            status=response.data[0]['status'],
-            created_at=response.data[0]['created_at'],
-            updated_at=response.data[0]['updated_at'],
+            start_date=row.start_date or date.today(),
+            end_date=row.end_date,
+            view=self._parse_view(row.view),
+            progress_percentage=int(row.progress_percentage or 0),
+            members=[],
             favourite_project=self._is_favourite_project(project_id, user_id),
+            archived=bool(row.archived),
         )
     
     def update_project_optimized(
@@ -1184,74 +1290,66 @@ class ProjectService:
         Updates name, avatar_file_id, avatar_color, avatar_icon, start_date, and end_date in a single operation.
         """
         
-        # Build update dictionary - only include fields that are being updated
-        updates = {
-            'updated_at': datetime.now(timezone.utc).isoformat()
-        }
-        
-        if name is not None:
-            updates['name'] = name
-        
-        # Handle avatar_file_id: 
-        # - If it's not None, set it to the new value
-        # - If it's None AND we're also setting avatar_color/avatar_icon, that means we want to clear it (switch to icon mode)
-        #   This is a heuristic: when switching to icon mode, we send avatar_file_id=null along with color/icon
-        if avatar_file_id is not None:
-            updates['avatar_file_id'] = str(avatar_file_id)
-        elif avatar_file_id is None and avatar_color is not None and avatar_icon is not None:
-            # Explicitly clear the avatar_file_id (set to NULL in database) when switching to icon mode
-            updates['avatar_file_id'] = None
-        
-        if avatar_color is not None:
-            updates['avatar_color'] = avatar_color
-        if avatar_icon is not None:
-            updates['avatar_icon'] = avatar_icon
-        if start_date is not None:
-            updates['start_date'] = start_date.isoformat() if isinstance(start_date, date) else start_date
-        if end_date is not None:
-            updates['end_date'] = end_date.isoformat() if isinstance(end_date, date) else end_date
-        
-        # Single optimized update query
+        pid = StdUUID(str(project_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('projects').update(updates).eq('id', str(project_id)).execute()
-        except AuthApiError as e:
+            row = db.get(Project, pid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            if name is not None:
+                row.name = name
+            if avatar_file_id is not None:
+                row.avatar_file_id = StdUUID(str(avatar_file_id))
+            elif avatar_file_id is None and avatar_color is not None and avatar_icon is not None:
+                row.avatar_file_id = None
+            if avatar_color is not None:
+                row.avatar_color = avatar_color
+            if avatar_icon is not None:
+                row.avatar_icon = avatar_icon
+            if start_date is not None:
+                row.start_date = start_date
+            if end_date is not None:
+                row.end_date = end_date
+            row.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update project: {e}"
+                detail=f"Failed to update project: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found"
-            )
-        
-        # Invalidate project summary cache
+        finally:
+            db.close()
+
         ProjectSummaryCache.delete_summary(str(project_id))
-        
-        # Get avatar URL efficiently
-        updated_project = response.data[0]
+
         avatar_url = None
-        if updated_project.get('avatar_file_id'):
+        if row.avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(UUID4(updated_project['avatar_file_id']))
+                avatar_url = self.files_service.get_file_url(UUID4(str(row.avatar_file_id)))
             except HTTPException:
                 pass
-        
+
         return ProjectUpdateResponse(
-            id=updated_project['id'],
-            name=updated_project['name'],
-            org_id=updated_project['org_id'],
-            avatar_color=updated_project.get('avatar_color'),
-            avatar_icon=updated_project.get('avatar_icon'),
+            id=UUID4(str(row.id)),
+            name=row.name,
+            org_id=UUID4(str(row.org_id)),
+            avatar_color=row.avatar_color,
+            avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
-            start_date=updated_project['start_date'],
-            end_date=updated_project.get('end_date'),
-            view=updated_project.get('view'),
-            status=updated_project.get('status'),
-            created_at=updated_project['created_at'],
-            updated_at=updated_project['updated_at'],
+            start_date=row.start_date or date.today(),
+            end_date=row.end_date,
+            view=self._parse_view(row.view),
+            progress_percentage=int(row.progress_percentage or 0),
+            members=[],
             favourite_project=self._is_favourite_project(project_id, user_id),
+            archived=bool(row.archived),
         )
     
     def update_project_progress(self, project_id: UUID4) -> None:
@@ -1260,72 +1358,102 @@ class ProjectService:
         Only counts top-level tasks (where parent_id is null).
         Progress = (completed_tasks / total_tasks) * 100
         """
+        pid = StdUUID(str(project_id))
         try:
-            project_id_str = str(project_id)
-            
-            tasks_response = supabase.table('tasks').select(
-                'id, status'
-            ).eq('project_id', project_id_str).is_('parent_id', 'null').execute()
-            
-            if not tasks_response.data:
-                total_tasks = 0
-                completed_tasks = 0
-            else:
-                total_tasks = len(tasks_response.data)
-                completed_tasks = sum(
-                    1 for task in tasks_response.data 
-                    if task.get('status') == TaskStatus.COMPLETED.value
+            db = SyncSessionLocal()
+            try:
+                rows = list(
+                    db.scalars(
+                        select(Task).where(
+                            Task.project_id == pid,
+                            Task.parent_id.is_(None),
+                        )
+                    ).all()
                 )
-            
-            if total_tasks == 0:
-                progress_percentage = 0
-            else:
-                progress_percentage = int((completed_tasks / total_tasks) * 100)
-            
-            supabase.table('projects').update({
-                'progress_percentage': progress_percentage,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', project_id_str).execute()
-            
-            logger.debug(f"Updated project {project_id} progress to {progress_percentage}% ({completed_tasks}/{total_tasks} tasks completed)")
-            
-            ProjectSummaryCache.delete_summary(project_id_str)
-            
-        except AuthApiError as e:
-            logger.error(f"Failed to update project progress for {project_id}: {e}")
+                total_tasks = len(rows)
+                completed_tasks = sum(
+                    1 for t in rows if t.status == TaskStatus.COMPLETED.value
+                )
+                progress_percentage = (
+                    int((completed_tasks / total_tasks) * 100) if total_tasks else 0
+                )
+                db.execute(
+                    update(Project)
+                    .where(Project.id == pid)
+                    .values(
+                        progress_percentage=progress_percentage,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+            logger.debug(
+                "Updated project %s progress to %s%% (%s/%s tasks completed)",
+                project_id,
+                progress_percentage,
+                completed_tasks,
+                total_tasks,
+            )
+            ProjectSummaryCache.delete_summary(str(project_id))
         except Exception as e:
-            logger.error(f"Error updating project progress for {project_id}: {e}", exc_info=True)
-        
+            logger.error(
+                "Error updating project progress for %s: %s",
+                project_id,
+                e,
+                exc_info=True,
+            )
+
     def join_project(
         self,
         project_id: UUID4,
         user_id: UUID4,
         org_id: UUID4,
     ) -> None:
+        _ = org_id
+        pid, uid = StdUUID(str(project_id)), StdUUID(str(user_id))
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            supabase.table('project_members').insert({
-                'project_id': str(project_id),
-                'user_id': str(user_id),
-                'role': ProjectMemberRole.MEMBER.value,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        except Exception as e:
-            error_code = getattr(e, 'code', None)
-            if error_code == '23505':  # unique_violation
+            db.add(
+                ProjectMemberRow(
+                    project_id=pid,
+                    user_id=uid,
+                    role=ProjectMemberRole.MEMBER.value,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            db.commit()
+        except IntegrityError as e:
+            db.rollback()
+            code = getattr(e.orig, "pgcode", None)
+            if code == "23505":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="User is already a member of this project"
+                    detail="User is already a member of this project",
                 )
-            elif error_code == '23503':  # foreign_key_violation
+            if code == "23503":
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Project not found"
+                    detail="Project not found",
                 )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to join project: {e}"
+                detail=f"Failed to join project: {e}",
             )
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to join project: {e}",
+            )
+        finally:
+            db.close()
 
     def _add_project_member(
         self,
@@ -1335,107 +1463,116 @@ class ProjectService:
         added_by_id: Optional[UUID4] = None,
         skip_notification: bool = False,
     ) -> ProjectMember:
-        logger.info(f"Adding project member {user_id} to project {project_id} with role {role} and added_by_id {added_by_id} and skip_notification {skip_notification}")
-        
-        # Check if user is already a member to prevent duplicates
+        logger.info(
+            "Adding project member %s to project %s with role %s and added_by_id %s and skip_notification %s",
+            user_id,
+            project_id,
+            role,
+            added_by_id,
+            skip_notification,
+        )
+        pid, uid = StdUUID(str(project_id)), StdUUID(str(user_id))
+        role_value = role.value if isinstance(role, ProjectMemberRole) else str(role)
+        db = SyncSessionLocal()
         try:
-            existing = supabase.table('project_members').select('id, role').eq(
-                'project_id', str(project_id)
-            ).eq('user_id', str(user_id)).execute()
-            
-            if existing.data and len(existing.data) > 0:
-                logger.info(f"User {user_id} is already a member of project {project_id}, skipping duplicate addition")
-                # Return existing member data
-                existing_member = existing.data[0]
-                return ProjectMember(
-                    id=UUID4(existing_member['id']),
-                    project_id=project_id,
-                    user_id=user_id,
-                    role=ProjectMemberRole(existing_member['role']),
-                    created_at=datetime.fromisoformat(existing_member['created_at'].replace('Z', '+00:00')),
-                    updated_at=datetime.fromisoformat(existing_member['updated_at'].replace('Z', '+00:00'))
+            existing = db.scalar(
+                select(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == pid,
+                    ProjectMemberRow.user_id == uid,
                 )
-        except Exception as e:
-            logger.warning(f"Failed to check for existing project member: {e}")
-            # Continue with insert if check fails
-        
-        try:
-            role_value = role.value if isinstance(role, ProjectMemberRole) else role
-            response = supabase.table('project_members').insert({
-                'project_id': str(project_id),
-                'user_id': str(user_id),
-                'role': role_value,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        except AuthApiError as e:
-            # Check if error is due to unique constraint violation (duplicate)
-            if hasattr(e, 'code') and e.code == '23505':
-                # Duplicate key error - fetch and return existing record
+            )
+            if existing:
+                logger.info(
+                    "User %s is already a member of project %s, skipping duplicate addition",
+                    user_id,
+                    project_id,
+                )
+                return self._project_member_row_to_api(existing, project_id)
+
+            now = datetime.now(timezone.utc)
+            m = ProjectMemberRow(
+                project_id=pid,
+                user_id=uid,
+                role=role_value,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(m)
+            db.commit()
+            db.refresh(m)
+            out = self._project_member_row_to_api(m, project_id)
+        except IntegrityError as e:
+            db.rollback()
+            if getattr(e.orig, "pgcode", None) == "23505":
+                db2 = SyncSessionLocal()
                 try:
-                    existing = supabase.table('project_members').select('*').eq(
-                        'project_id', str(project_id)
-                    ).eq('user_id', str(user_id)).execute()
-                    if existing.data and len(existing.data) > 0:
-                        logger.info(f"Duplicate project member prevented, returning existing member")
-                        existing_member = existing.data[0]
-                        return ProjectMember(
-                            id=UUID4(existing_member['id']),
-                            project_id=project_id,
-                            user_id=user_id,
-                            role=ProjectMemberRole(existing_member['role']),
-                            created_at=datetime.fromisoformat(existing_member['created_at'].replace('Z', '+00:00')),
-                            updated_at=datetime.fromisoformat(existing_member['updated_at'].replace('Z', '+00:00'))
+                    again = db2.scalar(
+                        select(ProjectMemberRow).where(
+                            ProjectMemberRow.project_id == pid,
+                            ProjectMemberRow.user_id == uid,
                         )
-                except:
-                    pass
-            
+                    )
+                    if again:
+                        logger.info(
+                            "Duplicate project member prevented, returning existing member"
+                        )
+                        return self._project_member_row_to_api(again, project_id)
+                finally:
+                    db2.close()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to add project member: {e}"
+                detail=f"Failed to add project member: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to add project member"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to add project member: {e}",
             )
-        
-        # Invalidate project summary cache (affects members list)
+        finally:
+            db.close()
+
         try:
             ProjectSummaryCache.delete_summary(str(project_id))
         except Exception as e:
-            logger.warning(f"Failed to invalidate project summary cache: {e}")
-        
-        # Send notification if added_by_id is provided and not skipped
+            logger.warning("Failed to invalidate project summary cache: %s", e)
+
         if added_by_id and not skip_notification and str(added_by_id) != str(user_id):
             try:
-                from app.utils.inbox_helpers import trigger_project_member_added_notification
-                
-                # Get project info
-                project_response = supabase.table('projects').select('name, org_id').eq('id', str(project_id)).execute()
-                if project_response.data:
-                    project_name = project_response.data[0].get('name', 'Unknown Project')
-                    org_id = project_response.data[0].get('org_id')
-                    
-                    # Get adder info
-                    adder_response = supabase.table('profiles').select('display_name').eq('user_id', str(added_by_id)).execute()
-                    added_by_name = 'Someone'
-                    if adder_response.data:
-                        added_by_name = adder_response.data[0].get('display_name', 'Someone')
-                    
+                from app.utils.inbox_helpers import (
+                    trigger_project_member_added_notification,
+                )
+
+                ndb = SyncSessionLocal()
+                try:
+                    prow = ndb.get(Project, pid)
+                    project_name = prow.name if prow else "Unknown Project"
+                    org_id_val = prow.org_id if prow else None
+                    added_by_name = "Someone"
+                    if org_id_val is not None:
+                        dn = ndb.scalar(
+                            select(Profile.display_name).where(
+                                Profile.user_id == StdUUID(str(added_by_id))
+                            )
+                        )
+                        if dn:
+                            added_by_name = dn
+                finally:
+                    ndb.close()
+
+                if org_id_val is not None:
                     trigger_project_member_added_notification(
                         user_id=user_id,
-                        org_id=UUID4(org_id),
+                        org_id=UUID4(str(org_id_val)),
                         project_id=project_id,
                         project_name=project_name,
                         added_by_id=added_by_id,
                         added_by_name=added_by_name,
                     )
             except Exception as e:
-                logger.warning(f"Failed to send project member added notification: {e}")
-        
-        return response.data[0]
+                logger.warning("Failed to send project member added notification: %s", e)
+
+        return out
     
     def add_project_member(
         self,
@@ -1450,56 +1587,55 @@ class ProjectService:
         """
         project_id_str = str(project_id)
         user_id_str = str(user_id)
-        
-        # Check if user is already a member
+        pid, uid = StdUUID(project_id_str), StdUUID(user_id_str)
+
+        db = SyncSessionLocal()
         try:
-            existing = supabase.table('project_members').select('id').eq(
-                'project_id', project_id_str
-            ).eq('user_id', user_id_str).execute()
-            
-            if existing.data and len(existing.data) > 0:
+            n = db.scalar(
+                select(func.count())
+                .select_from(ProjectMemberRow)
+                .where(
+                    ProjectMemberRow.project_id == pid,
+                    ProjectMemberRow.user_id == uid,
+                )
+            )
+            if n and n > 0:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="User is already a member of this project"
+                    detail="User is already a member of this project",
                 )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check existing membership: {e}"
-            )
-        
-        # Verify user belongs to the same organization as the project
-        try:
-            project_response = supabase.table('projects').select('org_id').eq('id', project_id_str).execute()
-            if not project_response.data or len(project_response.data) == 0:
+
+            prow = db.get(Project, pid)
+            if not prow:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Project not found"
+                    detail="Project not found",
                 )
-            
-            project_org_id = project_response.data[0]['org_id']
-            
-            # Check if user is a member of the organization
-            org_member_response = supabase.table('organization_members').select('id').eq(
-                'org_id', str(project_org_id)
-            ).eq('user_id', user_id_str).execute()
-            
-            if not org_member_response.data or len(org_member_response.data) == 0:
+            project_org_id = prow.org_id
+
+            om = db.scalar(
+                select(func.count())
+                .select_from(OrganizationMember)
+                .where(
+                    OrganizationMember.org_id == project_org_id,
+                    OrganizationMember.user_id == uid,
+                )
+            )
+            if not om:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="User must be a member of the organization to be added to the project"
+                    detail="User must be a member of the organization to be added to the project",
                 )
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to verify organization membership: {e}"
+                detail=f"Failed to verify organization membership: {e}",
             )
-        
-        # Add the member
+        finally:
+            db.close()
+
         return self._add_project_member(project_id, user_id, role, added_by_id=added_by_id)
     
     def remove_project_member(
@@ -1521,113 +1657,92 @@ class ProjectService:
         """
         project_id_str = str(project_id)
         user_id_str = str(user_id)
-        
-        # Check if member exists
+        pid, uid = StdUUID(project_id_str), StdUUID(user_id_str)
+
+        db = SyncSessionLocal()
         try:
-            member_response = supabase.table('project_members').select('*').eq(
-                'project_id', project_id_str
-            ).eq('user_id', user_id_str).execute()
-            
-            if not member_response.data or len(member_response.data) == 0:
+            mrow = db.scalar(
+                select(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == pid,
+                    ProjectMemberRow.user_id == uid,
+                )
+            )
+            if not mrow:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="User is not a member of this project"
+                    detail="User is not a member of this project",
                 )
-            
-            member = member_response.data[0]
-            member_role = member.get('role')
-            
-            # Prevent removing the last owner
+            member_role = mrow.role
             if member_role == ProjectMemberRole.OWNER.value:
-                owners_response = supabase.table('project_members').select('id').eq(
-                    'project_id', project_id_str
-                ).eq('role', ProjectMemberRole.OWNER.value).execute()
-                
-                if owners_response.data and len(owners_response.data) <= 1:
+                owner_count = db.scalar(
+                    select(func.count())
+                    .select_from(ProjectMemberRow)
+                    .where(
+                        ProjectMemberRow.project_id == pid,
+                        ProjectMemberRow.role == ProjectMemberRole.OWNER.value,
+                    )
+                )
+                if owner_count is not None and owner_count <= 1:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Cannot remove the last owner of the project"
+                        detail="Cannot remove the last owner of the project",
                     )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to check project membership: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check project membership: {e}"
+
+            res = db.execute(
+                delete(ProjectMemberRow).where(
+                    ProjectMemberRow.project_id == pid,
+                    ProjectMemberRow.user_id == uid,
+                )
             )
-        
-        # Remove the member
-        try:
-            delete_response = supabase.table('project_members').delete().eq(
-                'project_id', project_id_str
-            ).eq('user_id', user_id_str).execute()
-            
-            if not delete_response.data:
+            if not res.rowcount:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Member not found or already removed"
+                    detail="Member not found or already removed",
                 )
+            db.commit()
         except HTTPException:
+            db.rollback()
             raise
         except Exception as e:
-            logger.error(f"Failed to remove project member: {e}")
+            db.rollback()
+            logger.error("Failed to remove project member: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to remove project member: {e}"
+                detail=f"Failed to remove project member: {e}",
             )
-        
-        # Invalidate project summary cache
+        finally:
+            db.close()
+
         try:
-            cache = ProjectSummaryCache()
-            cache.invalidate(project_id)
+            ProjectSummaryCache.delete_summary(project_id_str)
         except Exception as e:
-            logger.warning(f"Failed to invalidate project summary cache: {e}")
-        
-        # Log activity if removed_by_id is provided
+            logger.warning("Failed to invalidate project summary cache: %s", e)
+
         if removed_by_id:
             try:
-                # Get project name for activity
-                project_response = supabase.table('projects').select('name').eq('id', project_id_str).execute()
-                project_name = project_response.data[0]['name'] if project_response.data else "Project"
-                
-                # Get removed user's name
-                user_cache = UserCache()
-                removed_user = user_cache.get(user_id)
-                removed_user_name = removed_user.display_name if removed_user else "User"
-                
-                # Get remover's name
-                remover = user_cache.get(removed_by_id)
-                remover_name = remover.display_name if remover else "User"
-                
-                self.activity_service.create_activity(
-                    entity_type=ActivityType.PROJECT,
-                    entity_id=project_id,
-                    activity_type="project_member_removed",
-                    user_id=removed_by_id,
-                    description=f"{remover_name} removed {removed_user_name} from project {project_name}",
+                pdb = SyncSessionLocal()
+                try:
+                    pname = pdb.scalar(select(Project.name).where(Project.id == pid))
+                finally:
+                    pdb.close()
+                project_name = pname or "Project"
+
+                removed_u = UserCache.get_user(user_id_str) or {}
+                remover_u = UserCache.get_user(str(removed_by_id)) or {}
+                removed_user_name = removed_u.get("display_name") or "User"
+                remover_name = remover_u.get("display_name") or "User"
+
+                self.activity_service.add_activity(
+                    ActivityType.PROJECT,
+                    project_id,
+                    removed_by_id,
+                    f"{remover_name} removed {removed_user_name} from project {project_name}",
                 )
             except Exception as e:
-                logger.warning(f"Failed to log project member removal activity: {e}")
-    
-    def _apply_pagination(
-        self,
-        query: Any,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-    ) -> Any:
-        if limit and offset:
-            query = query.range(offset, offset + limit - 1)
-        else:
-            if limit:
-                offset = offset or settings.DEFAULT_PAGINATION_OFFSET
-                query = query.range(offset, offset + limit - 1)
-            elif offset:
-                limit = limit or settings.DEFAULT_PAGINATION_LIMIT
-                query = query.range(0, limit - 1)
-                
-        return limit, offset, query
-    
+                logger.warning(
+                    "Failed to log project member removal activity: %s", e
+                )
+
     def get_favourite_projects(
         self,
         user_id: UUID4,
@@ -1635,76 +1750,67 @@ class ProjectService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> FavouriteProjectsResponse:
+        oid, uid = StdUUID(str(org_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
+        lim: Optional[int] = None
+        off: Optional[int] = None
         try:
-            # Query favourite projects and filter by organization
-            query = (
-                supabase.table('favourite_projects')
-                .select('projects(*)', count='exact')
-                .eq('user_id', str(user_id))
+            base = (
+                select(Project)
+                .join(
+                    FavouriteProject,
+                    FavouriteProject.project_id == Project.id,
+                )
+                .where(
+                    FavouriteProject.user_id == uid,
+                    Project.org_id == oid,
+                    Project.archived.is_(False),
+                )
             )
-            
-            # Filter projects by organization ID using the embedded projects relation
-            # We need to filter on the projects.org_id field
-            query = query.eq('projects.org_id', str(org_id))
-            
-            # Exclude archived projects from favourites
-            query = query.eq('projects.archived', False)
-            
-            # Apply pagination
-            limit, offset, query = self._apply_pagination(query, limit, offset)
-            
-            response = query.execute()
-        except AuthApiError as e:
+            total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+            stmt = base.order_by(Project.created_at.desc())
+            lim, off, page_stmt = apply_sa_limit_offset(stmt, limit, offset)
+            rows = list(db.scalars(page_stmt).all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get favourite projects: {e}"
+                detail=f"Failed to get favourite projects: {e}",
             )
-        
+        finally:
+            db.close()
+
         projects = []
-        for project in response.data:
-            # Skip if project doesn't exist or doesn't belong to the organization
-            if not project.get('projects'):
-                continue
-                
-            project_data = project['projects']
-            
-            # Double-check organization ID match (in case of query issues)
-            if str(project_data.get('org_id')) != str(org_id):
-                continue
-            
-            # Skip archived projects (additional safety check)
-            if project_data.get('archived', False):
-                continue
-            
-            avatar_url = None
-            if project_data.get('avatar_file_id'):
-                avatar_url = self.files_service.get_file_url(project_data['avatar_file_id'])
-            
-            project_id = UUID4(project_data['id'])
+        for project_data in rows:
+            avatar_url = (
+                self.files_service.get_file_url(project_data.avatar_file_id)
+                if project_data.avatar_file_id
+                else None
+            )
+            project_id = UUID4(str(project_data.id))
             members = self._get_project_members(project_id)
-            
-            projects.append(ProjectGetResponse(
-                id=project_id,
-                name=project_data['name'],
-                org_id=project_data['org_id'],
-                avatar_color=project_data.get('avatar_color'),
-                avatar_icon=project_data.get('avatar_icon'),
-                avatar_url=avatar_url,
-                start_date=project_data['start_date'],
-                end_date=project_data.get('end_date'),
-                view=project_data.get('view'),
-                progress_percentage=project_data.get('progress_percentage', 0),
-                members=members,
-                favourite_project=True,  # These are already favourite projects
-            ))
-        
-        total = response.count if hasattr(response, 'count') and response.count is not None else len(projects)
-        
+            view = self._parse_view(project_data.view)
+            projects.append(
+                ProjectGetResponse(
+                    id=project_id,
+                    name=project_data.name,
+                    org_id=UUID4(str(project_data.org_id)),
+                    avatar_color=project_data.avatar_color,
+                    avatar_icon=project_data.avatar_icon,
+                    avatar_url=avatar_url,
+                    start_date=project_data.start_date or date.today(),
+                    end_date=project_data.end_date,
+                    view=view,
+                    progress_percentage=int(project_data.progress_percentage or 0),
+                    members=members,
+                    favourite_project=True,
+                )
+            )
+
         return FavouriteProjectsResponse(
             projects=projects,
-            total=total,
-            offset=offset,
-            limit=limit,
+            total=int(total),
+            offset=off,
+            limit=lim,
         )
     
     def get_recent_projects(
@@ -1716,71 +1822,64 @@ class ProjectService:
         Get 5 most recent projects (by created_at) that the user is a member of.
         Returns only id and name for sidebar display.
         """
+        oid, uid = StdUUID(str(org_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
         try:
-            # Get member projects using RPC function
-            query = supabase.rpc('get_member_projects', {
-                'user_id': str(user_id),
-                'org_id': str(org_id),
-            })
-            
-            # Filter out archived projects
-            query = query.eq('archived', False)
-            
-            # Order by created_at descending (most recent first)
-            query = query.order('created_at', desc=True)
-            
-            # Limit to 5
-            query = query.limit(5)
-            
-            response = query.execute()
-            print("response", response)
-            
-            projects = []
-            for project in response.data:
-                projects.append(
-                    RecentProjectResponse(
-                        id=UUID4(project['id']),
-                        name=project['name'],
-                    )
-                )
-            
-            return RecentProjectsResponse(projects=projects)
-            
+            stmt = (
+                select_member_projects(db, uid, oid)
+                .where(Project.archived.is_(False))
+                .order_by(Project.created_at.desc())
+                .limit(5)
+            )
+            rows = list(db.scalars(stmt).all())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get recent projects: {e}"
-        )
-    
+                detail=f"Failed to get recent projects: {e}",
+            )
+        finally:
+            db.close()
+
+        projects = [
+            RecentProjectResponse(id=UUID4(str(r.id)), name=r.name) for r in rows
+        ]
+        return RecentProjectsResponse(projects=projects)
+
     def _get_non_member_projects_count(
         self,
-        org_member_role: OrganizationMemberRole,
+        org_member_role: str,
         org_id: UUID4,
         user_id: UUID4,
     ) -> int:
-        if org_member_role != OrganizationMemberRole.MEMBER.value:
-            try:
-                total_member_projects_count = (
-                    supabase
-                        .table('project_members')
-                        .select('*', count='exact', head=True)
-                        .eq('user_id', user_id)
-                        .execute().count
-                    )
-                total_projects_count = (
-                    supabase
-                        .table('projects')
-                        .select('*', count='exact', head=True)
-                        .eq('org_id', org_id)
-                        .execute().count
-                    )
-            except Exception as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to get total projects count: {e}"
+        if org_member_role == OrganizationMemberRole.MEMBER.value:
+            return 0
+        oid, uid = StdUUID(str(org_id)), StdUUID(str(user_id))
+        db = SyncSessionLocal()
+        try:
+            total_in_org = db.scalar(
+                select(func.count())
+                .select_from(Project)
+                .where(Project.org_id == oid, Project.archived.is_(False))
+            ) or 0
+            member_in_org = db.scalar(
+                select(func.count())
+                .select_from(Project)
+                .join(
+                    ProjectMemberRow,
+                    ProjectMemberRow.project_id == Project.id,
                 )
-            
-            # calculate the number of non-member projects
-            return total_projects_count - total_member_projects_count
-        
-        return 0
+                .where(
+                    ProjectMemberRow.user_id == uid,
+                    Project.org_id == oid,
+                    Project.archived.is_(False),
+                )
+            ) or 0
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get total projects count: {e}",
+            )
+        finally:
+            db.close()
+
+        return max(0, int(total_in_org) - int(member_in_org))

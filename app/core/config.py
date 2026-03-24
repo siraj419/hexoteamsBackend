@@ -8,15 +8,8 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     APP_PORT: int = 8002
     
-    # Supabase Details
-    SUPABASE_URL: str
-    SUPABASE_KEY: str
-    
     # Frontend URL (for email redirections)
     FRONTEND_URL: str = Field('http://194.195.119.112:8080', description="Frontend application URL used in email redirections")
-    
-    # Supabase Service Role Key (bypasses RLS for server-side operations)
-    SUPABASE_SERVICE_ROLE_KEY: str
 
     # SQLAlchemy async PostgreSQL (use asyncpg driver)
     DATABASE_URL: str = Field(

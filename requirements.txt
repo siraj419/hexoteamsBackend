@@ -5,7 +5,6 @@ asyncpg
 pydantic[email]
 python-dotenv
 pydantic_settings
-supabase
 boto3
 aiosmtplib
 celery[redis]
