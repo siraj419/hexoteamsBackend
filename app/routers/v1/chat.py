@@ -33,7 +33,10 @@ from app.schemas.chat import (
 from app.services.chat import ChatService
 from app.services.files import FilesService
 from app.utils.websocket_manager import manager
-from app.core import supabase
+from sqlalchemy import and_, select
+
+from app.db.sync_session import SyncSessionLocal
+from app.models import ChatConversation, DirectMessage
 
 router = APIRouter()
 
@@ -429,23 +432,28 @@ async def delete_direct_message(
         is_project_message=False
     )
     
-    # Get conversation_id from the message
-    message_response = supabase.table('direct_messages').select('sender_id, receiver_id, organization_id').eq('id', str(message_id)).execute()
     conversation_id = None
-    if message_response.data:
-        sender_id = message_response.data[0]['sender_id']
-        receiver_id = message_response.data[0]['receiver_id']
-        organization_id = message_response.data[0]['organization_id']
-        
-        # Find the conversation
-        user1_id = min(sender_id, receiver_id)
-        user2_id = max(sender_id, receiver_id)
-        conv_response = supabase.table('chat_conversations').select('id').eq(
-            'user1_id', user1_id
-        ).eq('user2_id', user2_id).eq('organization_id', organization_id).execute()
-        
-        if conv_response.data:
-            conversation_id = conv_response.data[0]['id']
+    db = SyncSessionLocal()
+    try:
+        dm = db.execute(select(DirectMessage).where(DirectMessage.id == message_id)).scalar_one_or_none()
+        if dm:
+            if str(dm.sender_id) <= str(dm.receiver_id):
+                u1, u2 = dm.sender_id, dm.receiver_id
+            else:
+                u1, u2 = dm.receiver_id, dm.sender_id
+            conv = db.execute(
+                select(ChatConversation.id).where(
+                    and_(
+                        ChatConversation.user1_id == u1,
+                        ChatConversation.user2_id == u2,
+                        ChatConversation.organization_id == dm.organization_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if conv:
+                conversation_id = conv
+    finally:
+        db.close()
     
     if conversation_id:
         await manager.broadcast_to_dm(

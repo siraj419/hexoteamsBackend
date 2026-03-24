@@ -5,7 +5,22 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import logging
 
-from app.core import supabase
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from app.db.sync_session import SyncSessionLocal
+from app.models import (
+    Profile,
+    Project,
+    ProjectMember,
+    ChatMessage,
+    DirectMessage,
+    ChatConversation,
+    ChatNotification,
+    ChatTypingIndicator,
+    ChatAttachment,
+    OrganizationMember,
+)
 from app.schemas.chat import (
     ProjectMessageCreate,
     ProjectMessageResponse,
@@ -23,7 +38,7 @@ from app.schemas.chat import (
     ProjectConversationResponse,
     ProjectConversationListResponse,
 )
-from app.utils import apply_pagination
+from app.utils import apply_pagination, apply_sa_limit_offset
 from app.utils.redis_cache import UserCache, cache_service
 from app.utils.inbox_helpers import trigger_direct_message_notification
 from app.services.files import FilesService
@@ -70,28 +85,35 @@ class ChatService:
                 }
             
             # Cache miss - fetch from database
-            user_response = supabase.table('profiles').select('user_id, display_name, email, avatar_file_id').eq(
-                'user_id', user_id_str
-            ).execute()
-            
-            if user_response.data and len(user_response.data) > 0:
-                user = user_response.data[0]
+            db = SyncSessionLocal()
+            try:
+                p = db.execute(select(Profile).where(Profile.user_id == UUID4(user_id_str))).scalar_one_or_none()
+            finally:
+                db.close()
+
+            if p:
+                user = {
+                    "user_id": str(p.user_id),
+                    "display_name": p.display_name,
+                    "email": p.email,
+                    "avatar_file_id": str(p.avatar_file_id) if p.avatar_file_id else None,
+                }
                 
                 # Get avatar URL from avatar_file_id
                 avatar_url = None
-                if user.get('avatar_file_id'):
+                if user.get("avatar_file_id"):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(UUID4(user["avatar_file_id"]))
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
                 # Prepare user data for caching (include email and avatar_file_id)
                 # Standardize on 'id' key for consistency across services
                 user_data_for_cache = {
-                    'id': user['user_id'],
-                    'display_name': user.get('display_name'),
-                    'email': user.get('email'),
-                    'avatar_file_id': user.get('avatar_file_id')
+                    "id": user["user_id"],
+                    "display_name": user.get("display_name"),
+                    "email": user.get("email"),
+                    "avatar_file_id": user.get("avatar_file_id"),
                 }
                 
                 # Cache the user data
@@ -99,9 +121,9 @@ class ChatService:
                 
                 # Return formatted info
                 return {
-                    'id': user['user_id'],
-                    'display_name': user.get('display_name'),
-                    'avatar_url': avatar_url
+                    "id": user["user_id"],
+                    "display_name": user.get("display_name"),
+                    "avatar_url": avatar_url,
                 }
             else:
                 # User not found - set default
@@ -164,35 +186,37 @@ class ChatService:
         # Batch fetch missing users from database
         if user_ids_to_fetch:
             try:
-                user_response = supabase.table('profiles').select(
-                    'user_id, display_name, email, avatar_file_id'
-                ).in_('user_id', user_ids_to_fetch).execute()
-                
-                if user_response.data:
-                    for user in user_response.data:
-                        user_id_str = user['user_id']
+                uuids = [UUID4(x) for x in user_ids_to_fetch]
+                db = SyncSessionLocal()
+                try:
+                    profiles = db.execute(select(Profile).where(Profile.user_id.in_(uuids))).scalars().all()
+                finally:
+                    db.close()
+
+                if profiles:
+                    for user in profiles:
+                        user_id_str = str(user.user_id)
                         
                         avatar_url = None
-                        if user.get('avatar_file_id'):
+                        if user.avatar_file_id:
                             try:
-                                avatar_url = self.files_service.get_file_url(UUID4(user['avatar_file_id']))
+                                avatar_url = self.files_service.get_file_url(user.avatar_file_id)
                             except Exception as e:
                                 logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
-                        
-                        # Standardize on 'id' key for consistency across services (include email)
+
                         user_data_for_cache = {
-                            'id': user['user_id'],
-                            'display_name': user.get('display_name'),
-                            'email': user.get('email'),
-                            'avatar_file_id': user.get('avatar_file_id')
+                            "id": str(user.user_id),
+                            "display_name": user.display_name,
+                            "email": user.email,
+                            "avatar_file_id": str(user.avatar_file_id) if user.avatar_file_id else None,
                         }
-                        
+
                         UserCache.set_user(user_id_str, user_data_for_cache)
-                        
+
                         result[user_id_str] = {
-                            'id': user['user_id'],
-                            'display_name': user.get('display_name'),
-                            'avatar_url': avatar_url
+                            "id": str(user.user_id),
+                            "display_name": user.display_name,
+                            "avatar_url": avatar_url,
                         }
                 
                 # Set default for users not found in database
@@ -236,29 +260,49 @@ class ChatService:
         """
         try:
             message_type = MessageType.FILE if message_data.attachments else MessageType.TEXT
-            
-            insert_data = {
-                'project_id': str(project_id),
-                'user_id': str(user_id),
-                'body': message_data.body,
-                'message_type': message_type.value,
-                'reply_to_id': str(message_data.reply_to_id) if message_data.reply_to_id else None,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-            }
-            
+
+            att_json = None
             if message_data.attachments:
-                insert_data['attachments'] = json.dumps([str(att_id) for att_id in message_data.attachments])
-            
-            response = supabase.table('chat_messages').insert(insert_data).execute()
-            
-            if not response.data:
+                att_json = [str(att_id) for att_id in message_data.attachments]
+
+            db = SyncSessionLocal()
+            try:
+                cm = ChatMessage(
+                    project_id=project_id,
+                    user_id=user_id,
+                    body=message_data.body,
+                    message_type=message_type.value,
+                    reply_to_id=message_data.reply_to_id,
+                    attachments=att_json,
+                )
+                db.add(cm)
+                db.commit()
+                db.refresh(cm)
+                message = {
+                    "id": str(cm.id),
+                    "project_id": str(cm.project_id),
+                    "user_id": str(cm.user_id),
+                    "body": cm.body,
+                    "message_type": cm.message_type,
+                    "reply_to_id": str(cm.reply_to_id) if cm.reply_to_id else None,
+                    "read_by": cm.read_by,
+                    "attachments": cm.attachments,
+                    "created_at": cm.created_at.isoformat() if cm.created_at else None,
+                    "edited_at": cm.edited_at.isoformat() if cm.edited_at else None,
+                    "deleted_at": cm.deleted_at.isoformat() if cm.deleted_at else None,
+                }
+                message_id = message["id"]
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+            if not message_id:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to create message"
+                    detail="Failed to create message",
                 )
-            
-            message = response.data[0]
-            message_id = message['id']
             
             # Link attachments to the message if any
             if message_data.attachments:
@@ -304,28 +348,50 @@ class ChatService:
             Dict containing messages and pagination info
         """
         try:
-            query = supabase.table('chat_messages').select(
-                'id, body, user_id, project_id, created_at, read_by, message_type, deleted_at, attachments, reply_to_id, edited_at',
-                count='exact'
-            ).eq('project_id', str(project_id)).is_('deleted_at', 'null')
-            
-            if search:
-                query = query.textSearch('search_vector', f"'{search}'")
-            
-            if before_date:
-                query = query.lt('created_at', before_date.isoformat())
-            
-            if after_date:
-                query = query.gt('created_at', after_date.isoformat())
-            
-            query = query.order('created_at', desc=True)
-            
-            limit, offset, query = apply_pagination(query, limit, offset)
-            
-            response = query.execute()
-            
-            messages = response.data if response.data else []
-            total = response.count if hasattr(response, 'count') else len(messages)
+            db = SyncSessionLocal()
+            try:
+                base = select(ChatMessage).where(
+                    ChatMessage.project_id == project_id,
+                    ChatMessage.deleted_at.is_(None),
+                )
+                if search:
+                    base = base.where(
+                        ChatMessage.search_vector.op("@@")(
+                            func.plainto_tsquery("english", search)
+                        )
+                    )
+                if before_date:
+                    base = base.where(ChatMessage.created_at < before_date)
+                if after_date:
+                    base = base.where(ChatMessage.created_at > after_date)
+
+                count_stmt = select(func.count()).select_from(base.subquery())
+                total = db.execute(count_stmt).scalar_one()
+
+                ordered = base.order_by(ChatMessage.created_at.desc())
+                lim, off, page_stmt = apply_sa_limit_offset(ordered, limit, offset)
+                rows = db.execute(page_stmt).scalars().all()
+
+                messages = []
+                for m in rows:
+                    messages.append(
+                        {
+                            "id": str(m.id),
+                            "body": m.body,
+                            "user_id": str(m.user_id),
+                            "project_id": str(m.project_id),
+                            "created_at": m.created_at.isoformat() if m.created_at else None,
+                            "read_by": m.read_by,
+                            "message_type": m.message_type,
+                            "deleted_at": m.deleted_at.isoformat() if m.deleted_at else None,
+                            "attachments": m.attachments,
+                            "reply_to_id": str(m.reply_to_id) if m.reply_to_id else None,
+                            "edited_at": m.edited_at.isoformat() if m.edited_at else None,
+                        }
+                    )
+                limit, offset = lim, off
+            finally:
+                db.close()
             
             # Collect all unique user IDs for batch fetching
             user_ids = set()
@@ -403,70 +469,95 @@ class ChatService:
             The updated message
         """
         try:
-            table_name = 'chat_messages' if is_project_message else 'direct_messages'
-            
-            # Select only needed fields for permission check
-            fields = 'id, user_id, created_at' if is_project_message else 'id, sender_id, created_at'
-            message_response = supabase.table(table_name).select(fields).eq('id', str(message_id)).execute()
-            
-            if not message_response.data:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Message not found"
-                )
-            
-            message = message_response.data[0]
-            
-            user_field = 'user_id' if is_project_message else 'sender_id'
-            if message[user_field] != str(user_id):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You can only edit your own messages"
-                )
-            
-            # Parse created_at and ensure it's timezone-aware
-            created_at_str = message['created_at']
-            if created_at_str.endswith('Z'):
-                created_at_str = created_at_str.replace('Z', '+00:00')
-            elif '+' not in created_at_str and created_at_str.count(':') >= 2:
-                # If no timezone info, assume UTC
-                created_at_str = created_at_str + '+00:00'
-            
-            created_at = datetime.fromisoformat(created_at_str)
-            # Ensure created_at is timezone-aware
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            
-            if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Messages can only be edited within 24 hours"
-                )
-            
-            update_data = {
-                'body': message_data.body,
-                'edited_at': datetime.now(timezone.utc).isoformat()
-            }
-            
-            response = supabase.table(table_name).update(update_data).eq('id', str(message_id)).execute()
-            
-            if not response.data:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update message"
-                )
-            
-            updated_message = response.data[0]
-            
-            # Normalize read_by field if it's a project message
-            if is_project_message:
-                updated_message['read_by'] = self._normalize_read_by(updated_message.get('read_by', []))
-            
-            # Get user_id from the message for enrichment
-            user_id_for_enrich = UUID4(updated_message[user_field]) if updated_message.get(user_field) else user_id
-            self._enrich_message_with_user_info(updated_message, user_id_for_enrich)
-            
-            return updated_message
+            db = SyncSessionLocal()
+            try:
+                if is_project_message:
+                    msg = db.execute(
+                        select(ChatMessage).where(ChatMessage.id == message_id)
+                    ).scalar_one_or_none()
+                    if not msg:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    if msg.user_id != user_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only edit your own messages",
+                        )
+                    created_at = msg.created_at
+                    user_field = "user_id"
+                else:
+                    msg = db.execute(
+                        select(DirectMessage).where(DirectMessage.id == message_id)
+                    ).scalar_one_or_none()
+                    if not msg:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    if msg.sender_id != user_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only edit your own messages",
+                        )
+                    created_at = msg.created_at
+                    user_field = "sender_id"
+
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Messages can only be edited within 24 hours",
+                    )
+
+                msg.body = message_data.body
+                msg.edited_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(msg)
+
+                if is_project_message:
+                    updated_message = {
+                        "id": str(msg.id),
+                        "body": msg.body,
+                        "user_id": str(msg.user_id),
+                        "project_id": str(msg.project_id),
+                        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                        "read_by": msg.read_by,
+                        "message_type": msg.message_type,
+                        "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
+                        "attachments": msg.attachments,
+                        "reply_to_id": str(msg.reply_to_id) if msg.reply_to_id else None,
+                        "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+                    }
+                    updated_message["read_by"] = self._normalize_read_by(
+                        updated_message.get("read_by", [])
+                    )
+                    user_id_for_enrich = UUID4(updated_message[user_field])
+                else:
+                    updated_message = {
+                        "id": str(msg.id),
+                        "body": msg.body,
+                        "sender_id": str(msg.sender_id),
+                        "receiver_id": str(msg.receiver_id),
+                        "organization_id": str(msg.organization_id),
+                        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                        "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+                        "deleted_at": msg.deleted_at.isoformat() if msg.deleted_at else None,
+                        "message_type": msg.message_type,
+                        "attachments": msg.attachments,
+                        "read_at": msg.read_at.isoformat() if msg.read_at else None,
+                    }
+                    user_id_for_enrich = UUID4(updated_message[user_field])
+
+                self._enrich_message_with_user_info(updated_message, user_id_for_enrich)
+                return updated_message
+            except HTTPException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
             
         except HTTPException:
             raise
@@ -494,32 +585,44 @@ class ChatService:
             is_project_message: Whether it's a project message or DM
         """
         try:
-            table_name = 'chat_messages' if is_project_message else 'direct_messages'
-            
-            # Select only needed fields for permission check
-            fields = 'id, user_id' if is_project_message else 'id, sender_id'
-            message_response = supabase.table(table_name).select(fields).eq('id', str(message_id)).execute()
-            
-            if not message_response.data:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Message not found"
-                )
-            
-            message = message_response.data[0]
-            
-            user_field = 'user_id' if is_project_message else 'sender_id'
-            if message[user_field] != str(user_id) and not is_project_admin:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You can only delete your own messages"
-                )
-            
-            update_data = {
-                'deleted_at': datetime.now(timezone.utc).isoformat()
-            }
-            
-            supabase.table(table_name).update(update_data).eq('id', str(message_id)).execute()
+            db = SyncSessionLocal()
+            try:
+                if is_project_message:
+                    msg = db.execute(
+                        select(ChatMessage).where(ChatMessage.id == message_id)
+                    ).scalar_one_or_none()
+                    if not msg:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    if msg.user_id != user_id and not is_project_admin:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only delete your own messages",
+                        )
+                    msg.deleted_at = datetime.now(timezone.utc)
+                else:
+                    msg = db.execute(
+                        select(DirectMessage).where(DirectMessage.id == message_id)
+                    ).scalar_one_or_none()
+                    if not msg:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    if msg.sender_id != user_id and not is_project_admin:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You can only delete your own messages",
+                        )
+                    msg.deleted_at = datetime.now(timezone.utc)
+                db.commit()
+            except HTTPException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
             
         except HTTPException:
             raise
@@ -548,83 +651,88 @@ class ChatService:
             List of message IDs that were marked as read
         """
         try:
-            # Get the created_at of the last read message
-            last_message = supabase.table('chat_messages').select('created_at').eq('id', str(last_read_message_id)).execute()
-            if not last_message.data or len(last_message.data) == 0:
-                return []
-            
-            last_message_created_at = last_message.data[0].get('created_at')
-            if not last_message_created_at:
-                return []
             user_id_str = str(user_id)
-            
-            # Get all message IDs that need to be updated (for return value)
-            message_response = supabase.table('chat_messages').select(
-                'id'
-            ).eq('project_id', str(project_id)).lte(
-                'created_at', last_message_created_at
-            ).is_('deleted_at', 'null').execute()
-            
-            if not message_response.data:
-                return []
-            
-            message_ids = [msg.get('id') for msg in message_response.data if msg.get('id')]
-            
-            if not message_ids:
-                return []
-            
-            # Use a single UPDATE query with JSONB operations to update all messages at once
-            # This uses PostgreSQL's JSONB functions to append user_id to read_by array
-            # only if it's not already present
+            db = SyncSessionLocal()
             try:
-                # Use RPC function to execute a single SQL update with JSONB operations
-                supabase.rpc('mark_project_messages_read_batch', {
-                    'p_project_id': str(project_id),
-                    'p_user_id': user_id_str,
-                    'p_last_message_created_at': last_message_created_at
-                }).execute()
-                
-                # Update chat_notifications to set unread_count to 0 for this user and project
-                try:
-                    # Get organization_id from the project
-                    project_response = supabase.table('projects').select('org_id').eq('id', str(project_id)).execute()
-                    if project_response.data and len(project_response.data) > 0:
-                        org_id = project_response.data[0].get('org_id')
-                        if org_id:
-                            # Update or insert chat_notifications record with unread_count = 0
-                            # Use upsert to handle both insert and update cases
-                            supabase.table('chat_notifications').upsert({
-                                'user_id': user_id_str,
-                                'chat_type': 'project',
-                                'reference_id': str(project_id),
-                                'unread_count': 0,
-                                'updated_at': datetime.now(timezone.utc).isoformat()
-                            }, on_conflict='user_id,chat_type,reference_id').execute()
-                            
-                            logger.info(f"Updated chat_notifications: unread_count=0 for user {user_id_str}, project {project_id}")
-                            
-                            # Invalidate all project conversation caches for this user and organization
-                            cache_service.invalidate_pattern(f"project_conversations:{user_id_str}:{org_id}:*")
-                            # Also invalidate any cached unread counts
-                            cache_service.invalidate_pattern(f"chat_notifications:project:{project_id}:{user_id_str}:*")
-                except Exception as cache_error:
-                    logger.warning(f"Failed to update chat_notifications or invalidate cache: {cache_error}")
-                
-                return message_ids
-                
-            except Exception as rpc_error:
-                # RPC function is required for efficient batch updates
-                # Since Supabase Python client doesn't support raw SQL expressions in updates,
-                # we need to use a PostgreSQL function via RPC to perform a single UPDATE
-                # with JSONB array operations
-                # 
-                # The SQL function is provided in 'backend/mark_messages_read_batch_function.sql'
-                logger.error(f"RPC function 'mark_project_messages_read_batch' not found: {rpc_error}")
-                logger.error("Please execute the SQL in 'backend/mark_messages_read_batch_function.sql' to create the required function.")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Batch update requires RPC function. Please create 'mark_project_messages_read_batch' function in the database. See 'backend/mark_messages_read_batch_function.sql' for the SQL."
+                last_created = db.execute(
+                    select(ChatMessage.created_at).where(ChatMessage.id == last_read_message_id)
+                ).scalar_one_or_none()
+                if not last_created:
+                    return []
+
+                id_rows = db.execute(
+                    select(ChatMessage.id).where(
+                        ChatMessage.project_id == project_id,
+                        ChatMessage.created_at <= last_created,
+                        ChatMessage.deleted_at.is_(None),
+                    )
+                ).scalars().all()
+                message_ids = [str(i) for i in id_rows]
+                if not message_ids:
+                    return []
+
+                db.execute(
+                    text(
+                        """
+                        UPDATE chat_messages
+                        SET read_by = CASE
+                            WHEN read_by IS NULL THEN jsonb_build_array(:uid)
+                            WHEN NOT (read_by @> to_jsonb(:uid::text)) THEN read_by || to_jsonb(:uid::text)
+                            ELSE read_by
+                        END
+                        WHERE project_id = CAST(:pid AS uuid)
+                          AND created_at <= :last_at
+                          AND deleted_at IS NULL
+                          AND (read_by IS NULL OR NOT (read_by @> to_jsonb(:uid::text)))
+                        """
+                    ),
+                    {
+                        "uid": user_id_str,
+                        "pid": str(project_id),
+                        "last_at": last_created,
+                    },
                 )
+
+                proj = db.execute(
+                    select(Project.org_id).where(Project.id == project_id)
+                ).first()
+                if proj and proj[0]:
+                    org_id = proj[0]
+                    now = datetime.now(timezone.utc)
+                    upsert = (
+                        pg_insert(ChatNotification)
+                        .values(
+                            user_id=user_id,
+                            chat_type="project",
+                            reference_id=project_id,
+                            unread_count=0,
+                            updated_at=now,
+                        )
+                        .on_conflict_do_update(
+                            constraint="uq_chat_notifications",
+                            set_={"unread_count": 0, "updated_at": now},
+                        )
+                    )
+                    db.execute(upsert)
+                    logger.info(
+                        "Updated chat_notifications: unread_count=0 for user %s, project %s",
+                        user_id_str,
+                        project_id,
+                    )
+                    cache_service.invalidate_pattern(
+                        f"project_conversations:{user_id_str}:{org_id}:*"
+                    )
+                    cache_service.invalidate_pattern(
+                        f"chat_notifications:project:{project_id}:{user_id_str}:*"
+                    )
+
+                db.commit()
+                return message_ids
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
             
         except HTTPException:
             raise
@@ -652,24 +760,46 @@ class ChatService:
             chat_type: 'project' or 'direct'
         """
         try:
-            if is_typing:
-                insert_data = {
-                    'chat_type': chat_type,
-                    'reference_id': str(reference_id),
-                    'user_id': str(user_id),
-                    'started_at': datetime.now(timezone.utc).isoformat(),
-                    'expires_at': (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
-                }
-                
-                supabase.table('chat_typing_indicators').upsert(
-                    insert_data,
-                    on_conflict='chat_type,reference_id,user_id'
-                ).execute()
-            else:
-                supabase.table('chat_typing_indicators').delete().eq(
-                    'reference_id', str(reference_id)
-                ).eq('user_id', str(user_id)).eq('chat_type', chat_type).execute()
-            
+            db = SyncSessionLocal()
+            try:
+                now = datetime.now(timezone.utc)
+                exp = now + timedelta(seconds=5)
+                if is_typing:
+                    row = db.execute(
+                        select(ChatTypingIndicator).where(
+                            ChatTypingIndicator.chat_type == chat_type,
+                            ChatTypingIndicator.reference_id == reference_id,
+                            ChatTypingIndicator.user_id == user_id,
+                        )
+                    ).scalar_one_or_none()
+                    if row:
+                        row.started_at = now
+                        row.expires_at = exp
+                    else:
+                        db.add(
+                            ChatTypingIndicator(
+                                chat_type=chat_type,
+                                reference_id=reference_id,
+                                user_id=user_id,
+                                started_at=now,
+                                expires_at=exp,
+                            )
+                        )
+                else:
+                    db.execute(
+                        delete(ChatTypingIndicator).where(
+                            ChatTypingIndicator.reference_id == reference_id,
+                            ChatTypingIndicator.user_id == user_id,
+                            ChatTypingIndicator.chat_type == chat_type,
+                        )
+                    )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
         except Exception as e:
             logger.error(f"Error sending typing indicator: {str(e)}")
     
@@ -703,66 +833,76 @@ class ChatService:
                 organization_id
             )
             
-            user1_id = min(str(sender_id), str(receiver_id))
-            user2_id = max(str(sender_id), str(receiver_id))
-            
-            existing_conv = supabase.table('chat_conversations').select(
-                'id, user1_id, user2_id, organization_id, last_message_at, created_at'
-            ).eq('user1_id', user1_id).eq('user2_id', user2_id).eq(
-                'organization_id', str(organization_id)
-            ).execute()
-            
-            if existing_conv.data:
-                conversation = existing_conv.data[0]
-            else:
-                insert_data = {
-                    'user1_id': user1_id,
-                    'user2_id': user2_id,
-                    'organization_id': str(organization_id),
-                    'last_message_at': datetime.now(timezone.utc).isoformat(),
-                    'created_at': datetime.now(timezone.utc).isoformat()
-                }
-                
-                response = supabase.table('chat_conversations').insert(insert_data).execute()
-                
-                if not response.data:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to create conversation"
-                    )
-                
-                conversation = response.data[0]
-            
-            # Enrich conversation with user info
-            self._enrich_conversation_with_user_info(conversation, sender_id)
-            
-            # Fetch last message preview if conversation exists
-            # For direct messages, query direct_messages table filtered by participants and organization
+            u1s = min(str(sender_id), str(receiver_id))
+            u2s = max(str(sender_id), str(receiver_id))
+            u1 = UUID4(u1s)
+            u2 = UUID4(u2s)
+
+            db = SyncSessionLocal()
             try:
-                user1_id = conversation['user1_id']
-                user2_id = conversation['user2_id']
-                
-                last_msg_response = supabase.table('direct_messages').select(
-                    'id, body, created_at'
-                ).eq('organization_id', str(organization_id)).or_(
-                    f"sender_id.eq.{user1_id},sender_id.eq.{user2_id}"
-                ).or_(
-                    f"receiver_id.eq.{user1_id},receiver_id.eq.{user2_id}"
-                ).is_('deleted_at', 'null').order(
-                    'created_at', desc=True
-                ).limit(1).execute()
-                
-                if last_msg_response.data and len(last_msg_response.data) > 0:
-                    body = last_msg_response.data[0].get('body', '')
-                    if body:
-                        conversation['last_message_preview'] = body[:100] + ('...' if len(body) > 100 else '')
+                conv = db.execute(
+                    select(ChatConversation).where(
+                        ChatConversation.user1_id == u1,
+                        ChatConversation.user2_id == u2,
+                        ChatConversation.organization_id == organization_id,
+                    )
+                ).scalar_one_or_none()
+                if not conv:
+                    conv = ChatConversation(
+                        user1_id=u1,
+                        user2_id=u2,
+                        organization_id=organization_id,
+                        last_message_at=datetime.now(timezone.utc),
+                    )
+                    db.add(conv)
+                    db.commit()
+                    db.refresh(conv)
+
+                conversation = {
+                    "id": str(conv.id),
+                    "user1_id": str(conv.user1_id),
+                    "user2_id": str(conv.user2_id),
+                    "organization_id": str(conv.organization_id),
+                    "last_message_at": conv.last_message_at.isoformat() if conv.last_message_at else None,
+                    "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                }
+
+                try:
+                    dm = db.execute(
+                        select(DirectMessage)
+                        .where(
+                            DirectMessage.organization_id == organization_id,
+                            DirectMessage.deleted_at.is_(None),
+                            or_(
+                                and_(
+                                    DirectMessage.sender_id == u1,
+                                    DirectMessage.receiver_id == u2,
+                                ),
+                                and_(
+                                    DirectMessage.sender_id == u2,
+                                    DirectMessage.receiver_id == u1,
+                                ),
+                            ),
+                        )
+                        .order_by(DirectMessage.created_at.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if dm:
+                        body = dm.body or ""
+                        if body:
+                            conversation["last_message_preview"] = body[:100] + (
+                                "..." if len(body) > 100 else ""
+                            )
+                        else:
+                            conversation["last_message_preview"] = "[File attachment]"
                     else:
-                        conversation['last_message_preview'] = '[File attachment]'
-                else:
-                    conversation['last_message_preview'] = None
-            except Exception:
-                # If fetching last message fails, set to None
-                conversation['last_message_preview'] = None
+                        conversation["last_message_preview"] = None
+                except Exception:
+                    conversation["last_message_preview"] = None
+            finally:
+                db.close()
+
+            self._enrich_conversation_with_user_info(conversation, sender_id)
             
             # Ensure unread_count is set
             if 'unread_count' not in conversation:
@@ -799,114 +939,110 @@ class ChatService:
             Dict containing conversations and pagination info
         """
         try:
-            query = supabase.table('chat_conversations').select(
-                'id, user1_id, user2_id, organization_id, last_message_at, created_at',
-                count='exact'
-            ).eq('organization_id', str(organization_id)).or_(
-                f"user1_id.eq.{user_id},user2_id.eq.{user_id}"
-            ).order('last_message_at', desc=True)
-            
-            limit, offset, query = apply_pagination(query, limit, offset)
-            
-            response = query.execute()
-            
-            conversations = response.data if response.data else []
-            total = response.count if hasattr(response, 'count') else len(conversations)
-            
-            # Collect all unique other_user_ids and conversation IDs for batch fetching
-            user_ids = set()
-            conversation_ids = []
-            for conversation in conversations:
-                other_user_id = conversation.get('user2_id') if conversation.get('user1_id') == str(user_id) else conversation.get('user1_id')
-                if other_user_id:
-                    try:
-                        user_ids.add(UUID4(other_user_id))
-                    except Exception:
-                        pass
-                conversation_ids.append(conversation['id'])
-            
-            # Batch fetch all user info
-            user_info_cache = {}
-            if user_ids:
-                user_info_cache = self._batch_get_user_info(list(user_ids))
-            
-            # Batch fetch all unread counts for conversations
-            unread_counts = {}
-            if conversation_ids:
-                conversation_ids_str = [str(cid) for cid in conversation_ids]
-                unread_response = supabase.table('chat_notifications').select(
-                    'reference_id, unread_count'
-                ).eq('user_id', str(user_id)).eq('chat_type', 'direct').in_(
-                    'reference_id', conversation_ids_str
-                ).execute()
-                
-                if unread_response.data:
-                    unread_counts = {
-                        item['reference_id']: item.get('unread_count', 0) or 0
-                        for item in unread_response.data
+            db = SyncSessionLocal()
+            try:
+                base = select(ChatConversation).where(
+                    ChatConversation.organization_id == organization_id,
+                    or_(
+                        ChatConversation.user1_id == user_id,
+                        ChatConversation.user2_id == user_id,
+                    ),
+                )
+                total = db.execute(
+                    select(func.count()).select_from(base.subquery())
+                ).scalar_one()
+                ordered = base.order_by(
+                    ChatConversation.last_message_at.desc().nullslast(),
+                    ChatConversation.created_at.desc(),
+                )
+                lim, off, page_stmt = apply_sa_limit_offset(ordered, limit, offset)
+                conv_rows = db.execute(page_stmt).scalars().all()
+                limit, offset = lim, off
+
+                conversations = []
+                conversation_ids = []
+                user_ids = set()
+                for c in conv_rows:
+                    cid = str(c.id)
+                    conversation_ids.append(cid)
+                    d = {
+                        "id": cid,
+                        "user1_id": str(c.user1_id),
+                        "user2_id": str(c.user2_id),
+                        "organization_id": str(c.organization_id),
+                        "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+                        "created_at": c.created_at.isoformat() if c.created_at else None,
                     }
-            
-            # Batch fetch last messages for all conversations
-            last_messages = {}
-            if conversation_ids:
-                conversation_ids_str = [str(cid) for cid in conversation_ids]
-                # First, batch fetch all conversations to get user1_id and user2_id
-                convs_response = supabase.table('chat_conversations').select(
-                    'id, user1_id, user2_id'
-                ).in_('id', conversation_ids_str).execute()
-                
-                convs_map = {}
-                if convs_response.data:
-                    for conv in convs_response.data:
-                        convs_map[str(conv['id'])] = {
-                            'user1_id': conv.get('user1_id'),
-                            'user2_id': conv.get('user2_id')
-                        }
-                
-                # Get last message for each conversation
-                for conv_id_str in conversation_ids_str:
+                    conversations.append(d)
+                    ou = (
+                        d["user2_id"]
+                        if d["user1_id"] == str(user_id)
+                        else d["user1_id"]
+                    )
+                    if ou:
+                        try:
+                            user_ids.add(UUID4(ou))
+                        except Exception:
+                            pass
+
+                user_info_cache = {}
+                if user_ids:
+                    user_info_cache = self._batch_get_user_info(list(user_ids))
+
+                unread_counts = {}
+                if conversation_ids:
+                    uuids = [UUID4(x) for x in conversation_ids]
+                    notif_rows = db.execute(
+                        select(ChatNotification.reference_id, ChatNotification.unread_count).where(
+                            ChatNotification.user_id == user_id,
+                            ChatNotification.chat_type == "direct",
+                            ChatNotification.reference_id.in_(uuids),
+                        )
+                    ).all()
+                    for ref_id, uc in notif_rows:
+                        unread_counts[str(ref_id)] = uc or 0
+
+                last_messages = {}
+                for d in conversations:
+                    conv_id_str = d["id"]
                     try:
-                        conv_data = convs_map.get(conv_id_str)
-                        if not conv_data:
-                            continue
-                        
-                        user1_id = conv_data.get('user1_id')
-                        user2_id = conv_data.get('user2_id')
-                        
-                        if not user1_id or not user2_id:
-                            continue
-                        
-                        # Query direct_messages table (not chat_messages) for direct messages
-                        # Filter by organization and participants
-                        # Get messages where both users are involved (either as sender or receiver)
-                        # We'll filter in Python to ensure both participants are involved
-                        last_msg_response = supabase.table('direct_messages').select(
-                            'id, body, created_at, sender_id, receiver_id'
-                        ).eq('organization_id', str(organization_id)).or_(
-                            f"sender_id.eq.{user1_id},sender_id.eq.{user2_id}"
-                        ).or_(
-                            f"receiver_id.eq.{user1_id},receiver_id.eq.{user2_id}"
-                        ).is_('deleted_at', 'null').order(
-                            'created_at', desc=True
-                        ).limit(10).execute()  # Get more to filter properly
-                        
-                        # Filter to ensure both participants are involved
-                        if last_msg_response.data:
-                            for msg in last_msg_response.data:
-                                sender = msg.get('sender_id')
-                                receiver = msg.get('receiver_id')
-                                # Check if both user1_id and user2_id are involved
-                                if (sender == user1_id and receiver == user2_id) or (sender == user2_id and receiver == user1_id):
-                                    last_messages[conv_id_str] = msg
-                                    break
-                        
-                        if last_msg_response.data and len(last_msg_response.data) > 0:
-                            last_messages[conv_id_str] = last_msg_response.data[0]
+                        u1 = UUID4(d["user1_id"])
+                        u2 = UUID4(d["user2_id"])
+                        dm = db.execute(
+                            select(DirectMessage)
+                            .where(
+                                DirectMessage.organization_id == organization_id,
+                                DirectMessage.deleted_at.is_(None),
+                                or_(
+                                    and_(
+                                        DirectMessage.sender_id == u1,
+                                        DirectMessage.receiver_id == u2,
+                                    ),
+                                    and_(
+                                        DirectMessage.sender_id == u2,
+                                        DirectMessage.receiver_id == u1,
+                                    ),
+                                ),
+                            )
+                            .order_by(DirectMessage.created_at.desc())
+                            .limit(1)
+                        ).scalar_one_or_none()
+                        if dm:
+                            last_messages[conv_id_str] = {
+                                "body": dm.body,
+                                "created_at": dm.created_at.isoformat() if dm.created_at else None,
+                                "sender_id": str(dm.sender_id),
+                                "receiver_id": str(dm.receiver_id),
+                            }
                     except Exception as e:
-                        logger.warning(f"Failed to fetch last message for conversation {conv_id_str}: {str(e)}")
-                        pass  # Continue if fetching last message fails
-            
-            # Enrich conversations with batch-fetched user info, unread counts, and last message preview
+                        logger.warning(
+                            "Failed to fetch last message for conversation %s: %s",
+                            conv_id_str,
+                            e,
+                        )
+            finally:
+                db.close()
+
             for conversation in conversations:
                 other_user_id = conversation.get('user2_id') if conversation.get('user1_id') == str(user_id) else conversation.get('user1_id')
                 
@@ -969,90 +1105,89 @@ class ChatService:
             Dict containing project conversations and pagination info
         """
         try:
-            # Get all projects where user is a member
-            projects_response = supabase.rpc('get_member_projects', {
-                'user_id': str(user_id),
-                'org_id': str(organization_id),
-            }).eq('archived', False).execute()
-            
-            if not projects_response.data:
-                return {
-                    'conversations': [],
-                    'total': 0,
-                    'limit': limit,
-                    'offset': offset
-                }
-            
-            project_ids = [p.get('id') for p in projects_response.data if p.get('id')]
-            
-            # Batch fetch all unread counts for projects
-            unread_counts = {}
-            if project_ids:
-                project_ids_str = [str(pid) for pid in project_ids]
-                unread_response = supabase.table('chat_notifications').select(
-                    'reference_id, unread_count'
-                ).eq('user_id', str(user_id)).eq('chat_type', 'project').in_(
-                    'reference_id', project_ids_str
-                ).execute()
-                
-                if unread_response.data:
-                    unread_counts = {
-                        item['reference_id']: item.get('unread_count', 0) or 0
-                        for item in unread_response.data
+            db = SyncSessionLocal()
+            try:
+                projects = db.execute(
+                    select(Project)
+                    .join(ProjectMember, ProjectMember.project_id == Project.id)
+                    .where(
+                        ProjectMember.user_id == user_id,
+                        Project.org_id == organization_id,
+                        Project.archived.is_(False),
+                    )
+                ).scalars().all()
+
+                if not projects:
+                    return {
+                        "conversations": [],
+                        "total": 0,
+                        "limit": limit,
+                        "offset": offset,
                     }
-            
-            # Get last message for each project
-            conversations_data = []
-            for project in projects_response.data:
-                project_id = project['id']
-                project_id_str = str(project_id)
-                
-                # Get last message
-                last_message_response = supabase.table('chat_messages').select(
-                    'id, body, created_at'
-                ).eq('project_id', project_id).is_('deleted_at', 'null').order(
-                    'created_at', desc=True
-                ).limit(1).execute()
-                
-                last_message = None
-                last_message_at = None
-                last_message_preview = None
-                
-                if last_message_response.data and len(last_message_response.data) > 0:
-                    last_message = last_message_response.data[0]
-                    # Parse datetime - handle both with and without timezone
-                    created_at_str = last_message['created_at']
-                    if created_at_str.endswith('Z'):
-                        created_at_str = created_at_str.replace('Z', '+00:00')
-                    last_message_at = datetime.fromisoformat(created_at_str)
-                    # Ensure timezone-aware (if naive, assume UTC)
-                    if last_message_at.tzinfo is None:
-                        last_message_at = last_message_at.replace(tzinfo=timezone.utc)
-                    # Get preview (first 100 chars)
-                    body = last_message.get('body', '')
-                    if body:
-                        last_message_preview = body[:100] + ('...' if len(body) > 100 else '')
-                    else:
-                        last_message_preview = '[File attachment]'
-                
-                # Get unread count from batch-fetched data
-                unread_count = unread_counts.get(project_id_str, 0)
-                
-                # Get project avatar URL if available
-                avatar_url = None
-                if project.get('avatar_file_id'):
-                    avatar_url = self.files_service.get_file_url(project['avatar_file_id'])
-                
-                conversations_data.append({
-                    'project_id': project_id,
-                    'project_name': project['name'],
-                    'avatar_color': project.get('avatar_color'),
-                    'avatar_icon': project.get('avatar_icon'),
-                    'avatar_url': avatar_url,
-                    'last_message_at': last_message_at,
-                    'last_message_preview': last_message_preview,
-                    'unread_count': unread_count
-                })
+
+                project_ids = [p.id for p in projects]
+                unread_counts = {}
+                if project_ids:
+                    for ref_id, uc in db.execute(
+                        select(
+                            ChatNotification.reference_id,
+                            ChatNotification.unread_count,
+                        ).where(
+                            ChatNotification.user_id == user_id,
+                            ChatNotification.chat_type == "project",
+                            ChatNotification.reference_id.in_(project_ids),
+                        )
+                    ).all():
+                        unread_counts[str(ref_id)] = uc or 0
+
+                conversations_data = []
+                for project in projects:
+                    project_id = project.id
+                    project_id_str = str(project_id)
+
+                    cm = db.execute(
+                        select(ChatMessage)
+                        .where(
+                            ChatMessage.project_id == project_id,
+                            ChatMessage.deleted_at.is_(None),
+                        )
+                        .order_by(ChatMessage.created_at.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+
+                    last_message_at = None
+                    last_message_preview = None
+                    if cm and cm.created_at:
+                        last_message_at = cm.created_at
+                        if last_message_at.tzinfo is None:
+                            last_message_at = last_message_at.replace(tzinfo=timezone.utc)
+                        body = cm.body or ""
+                        if body:
+                            last_message_preview = body[:100] + (
+                                "..." if len(body) > 100 else ""
+                            )
+                        else:
+                            last_message_preview = "[File attachment]"
+
+                    unread_count = unread_counts.get(project_id_str, 0)
+                    avatar_url = None
+                    if project.avatar_file_id:
+                        avatar_url = self.files_service.get_file_url(project.avatar_file_id)
+
+                    conversations_data.append(
+                        {
+                            "project_id": project_id,
+                            "project_name": project.name,
+                            "avatar_color": project.avatar_color,
+                            "avatar_icon": project.avatar_icon,
+                            "avatar_url": avatar_url,
+                            "last_message_at": last_message_at,
+                            "last_message_preview": last_message_preview,
+                            "unread_count": unread_count,
+                        }
+                    )
+            finally:
+                db.close()
             
             # Sort by last_message_at (newest first), projects with no messages go to end
             # Ensure all datetimes are timezone-aware for comparison
@@ -1114,32 +1249,50 @@ class ChatService:
             
             message_type = MessageType.FILE if message_data.attachments else MessageType.TEXT
             
-            insert_data = {
-                'sender_id': str(sender_id),
-                'receiver_id': receiver_id,
-                'organization_id': conversation['organization_id'],
-                'body': message_data.body,
-                'message_type': message_type.value,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-            }
-            
+            att_list = None
             if message_data.attachments:
-                insert_data['attachments'] = json.dumps([str(att_id) for att_id in message_data.attachments])
-            
-            response = supabase.table('direct_messages').insert(insert_data).execute()
-            
-            if not response.data:
+                att_list = [str(att_id) for att_id in message_data.attachments]
+
+            db = SyncSessionLocal()
+            try:
+                dm = DirectMessage(
+                    sender_id=sender_id,
+                    receiver_id=UUID4(receiver_id) if isinstance(receiver_id, str) else receiver_id,
+                    organization_id=UUID4(conversation["organization_id"])
+                    if isinstance(conversation["organization_id"], str)
+                    else conversation["organization_id"],
+                    body=message_data.body,
+                    message_type=message_type.value,
+                    attachments=att_list,
+                )
+                db.add(dm)
+                db.commit()
+                db.refresh(dm)
+                message = {
+                    "id": str(dm.id),
+                    "sender_id": str(dm.sender_id),
+                    "receiver_id": str(dm.receiver_id),
+                    "organization_id": str(dm.organization_id),
+                    "body": dm.body,
+                    "message_type": dm.message_type,
+                    "attachments": dm.attachments,
+                    "created_at": dm.created_at.isoformat() if dm.created_at else None,
+                    "edited_at": dm.edited_at.isoformat() if dm.edited_at else None,
+                    "deleted_at": dm.deleted_at.isoformat() if dm.deleted_at else None,
+                    "read_at": dm.read_at.isoformat() if dm.read_at else None,
+                }
+                message_id = message["id"]
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+            if not message_id:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to create message"
+                    detail="Failed to create message",
                 )
-            
-            message = response.data[0]
-            message_id = message['id']
-            
-            # Ensure edited_at is set (None for new messages)
-            if 'edited_at' not in message:
-                message['edited_at'] = None
             
             # Link attachments to the message if any
             if message_data.attachments:
@@ -1201,30 +1354,57 @@ class ChatService:
         """
         try:
             conversation = self._get_conversation(conversation_id, user_id, organization_id)
-            
-            query = supabase.table('direct_messages').select(
-                'id, body, sender_id, receiver_id, created_at, edited_at, deleted_at, message_type, attachments, read_at, organization_id',
-                count='exact'
-            ).eq('organization_id', str(organization_id)).or_(
-                f"sender_id.eq.{conversation['user1_id']},sender_id.eq.{conversation['user2_id']}"
-            ).or_(
-                f"receiver_id.eq.{conversation['user1_id']},receiver_id.eq.{conversation['user2_id']}"
-            ).is_('deleted_at', 'null')
-            
-            if before_date:
-                query = query.lt('created_at', before_date.isoformat())
-            
-            if after_date:
-                query = query.gt('created_at', after_date.isoformat())
-            
-            query = query.order('created_at', desc=True)
-            
-            limit, offset, query = apply_pagination(query, limit, offset)
-            
-            response = query.execute()
-            
-            messages = response.data if response.data else []
-            total = response.count if hasattr(response, 'count') else len(messages)
+            u1 = UUID4(conversation["user1_id"])
+            u2 = UUID4(conversation["user2_id"])
+
+            db = SyncSessionLocal()
+            try:
+                base = select(DirectMessage).where(
+                    DirectMessage.organization_id == organization_id,
+                    DirectMessage.deleted_at.is_(None),
+                    or_(
+                        and_(
+                            DirectMessage.sender_id == u1,
+                            DirectMessage.receiver_id == u2,
+                        ),
+                        and_(
+                            DirectMessage.sender_id == u2,
+                            DirectMessage.receiver_id == u1,
+                        ),
+                    ),
+                )
+                if before_date:
+                    base = base.where(DirectMessage.created_at < before_date)
+                if after_date:
+                    base = base.where(DirectMessage.created_at > after_date)
+
+                total = db.execute(
+                    select(func.count()).select_from(base.subquery())
+                ).scalar_one()
+                ordered = base.order_by(DirectMessage.created_at.desc())
+                lim, off, page_stmt = apply_sa_limit_offset(ordered, limit, offset)
+                rows = db.execute(page_stmt).scalars().all()
+                limit, offset = lim, off
+
+                messages = []
+                for m in rows:
+                    messages.append(
+                        {
+                            "id": str(m.id),
+                            "body": m.body,
+                            "sender_id": str(m.sender_id),
+                            "receiver_id": str(m.receiver_id),
+                            "created_at": m.created_at.isoformat() if m.created_at else None,
+                            "edited_at": m.edited_at.isoformat() if m.edited_at else None,
+                            "deleted_at": m.deleted_at.isoformat() if m.deleted_at else None,
+                            "message_type": m.message_type,
+                            "attachments": m.attachments,
+                            "read_at": m.read_at.isoformat() if m.read_at else None,
+                            "organization_id": str(m.organization_id),
+                        }
+                    )
+            finally:
+                db.close()
             
             # Collect all unique sender and receiver IDs for batch fetching
             user_ids = set()
@@ -1309,70 +1489,92 @@ class ChatService:
         """
         try:
             conversation = self._get_conversation(conversation_id, user_id, organization_id)
-            
-            last_message = supabase.table('direct_messages').select(
-                'created_at'
-            ).eq('id', str(last_read_message_id)).execute()
-            
-            if not last_message.data or len(last_message.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Message not found"
-                )
-            
-            last_message_created_at = last_message.data[0].get('created_at')
-            if not last_message_created_at:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Message missing created_at field"
-                )
-            
-            # Get the other participant in the conversation
-            other_user_id = conversation['user2_id'] if conversation['user1_id'] == str(user_id) else conversation['user1_id']
-            
-            # Get message IDs that will be updated (for broadcasting) - do this before update
-            # Filter by conversation participants and organization to ensure we only update messages in this conversation
-            unread_messages = supabase.table('direct_messages').select('id').eq(
-                'organization_id', str(organization_id)
-            ).eq('receiver_id', str(user_id)).eq('sender_id', other_user_id).lte(
-                'created_at', last_message_created_at
-            ).is_('read_at', 'null').execute()
-            
-            message_ids = [msg.get('id') for msg in (unread_messages.data or []) if msg.get('id')]
-            
-            # Batch update all messages in a single query
-            # Filter by conversation participants and organization to ensure we only update messages in this conversation
-            if message_ids:
-                read_at = datetime.now(timezone.utc).isoformat()
-                supabase.table('direct_messages').update({
-                    'read_at': read_at
-                }).eq('organization_id', str(organization_id)).eq('receiver_id', str(user_id)).eq(
-                    'sender_id', other_user_id
-                ).lte(
-                    'created_at', last_message_created_at
-                ).is_('read_at', 'null').execute()
-                
-                # Update chat_notifications to set unread_count to 0 for this user and conversation
-                try:
-                    # Update or insert chat_notifications record with unread_count = 0
-                    # Use upsert to handle both insert and update cases
-                    supabase.table('chat_notifications').upsert({
-                        'user_id': str(user_id),
-                        'chat_type': 'direct',
-                        'reference_id': str(conversation_id),
-                        'unread_count': 0,
-                        'updated_at': datetime.now(timezone.utc).isoformat()
-                    }, on_conflict='user_id,chat_type,reference_id').execute()
-                    
-                    logger.info(f"Updated chat_notifications: unread_count=0 for user {user_id}, conversation {conversation_id}")
-                    
-                    # Invalidate cache for DM conversations
-                    cache_service.invalidate_pattern(f"direct_conversations:{str(user_id)}:{str(organization_id)}:*")
-                    cache_service.invalidate_pattern(f"chat_notifications:direct:{conversation_id}:{str(user_id)}:*")
-                except Exception as cache_error:
-                    logger.warning(f"Failed to update chat_notifications or invalidate cache: {cache_error}")
-            
-            return message_ids
+            other_user_id = (
+                conversation["user2_id"]
+                if conversation["user1_id"] == str(user_id)
+                else conversation["user1_id"]
+            )
+            other_uuid = UUID4(other_user_id)
+
+            db = SyncSessionLocal()
+            try:
+                lm = db.execute(
+                    select(DirectMessage.created_at).where(
+                        DirectMessage.id == last_read_message_id
+                    )
+                ).scalar_one_or_none()
+                if not lm:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Message not found",
+                    )
+                last_message_created_at = lm
+                if not last_message_created_at:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Message missing created_at field",
+                    )
+
+                id_rows = db.execute(
+                    select(DirectMessage.id).where(
+                        DirectMessage.organization_id == organization_id,
+                        DirectMessage.receiver_id == user_id,
+                        DirectMessage.sender_id == other_uuid,
+                        DirectMessage.created_at <= last_message_created_at,
+                        DirectMessage.read_at.is_(None),
+                    )
+                ).scalars().all()
+                message_ids = [str(i) for i in id_rows]
+
+                if message_ids:
+                    read_at = datetime.now(timezone.utc)
+                    db.execute(
+                        update(DirectMessage)
+                        .where(
+                            DirectMessage.organization_id == organization_id,
+                            DirectMessage.receiver_id == user_id,
+                            DirectMessage.sender_id == other_uuid,
+                            DirectMessage.created_at <= last_message_created_at,
+                            DirectMessage.read_at.is_(None),
+                        )
+                        .values(read_at=read_at)
+                    )
+                    now = datetime.now(timezone.utc)
+                    db.execute(
+                        pg_insert(ChatNotification)
+                        .values(
+                            user_id=user_id,
+                            chat_type="direct",
+                            reference_id=conversation_id,
+                            unread_count=0,
+                            updated_at=now,
+                        )
+                        .on_conflict_do_update(
+                            constraint="uq_chat_notifications",
+                            set_={"unread_count": 0, "updated_at": now},
+                        )
+                    )
+                    logger.info(
+                        "Updated chat_notifications: unread_count=0 for user %s, conversation %s",
+                        user_id,
+                        conversation_id,
+                    )
+                    cache_service.invalidate_pattern(
+                        f"direct_conversations:{str(user_id)}:{str(organization_id)}:*"
+                    )
+                    cache_service.invalidate_pattern(
+                        f"chat_notifications:direct:{conversation_id}:{str(user_id)}:*"
+                    )
+                db.commit()
+                return message_ids
+            except HTTPException:
+                db.rollback()
+                raise
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
             
         except Exception as e:
             logger.error(f"Error marking DM as read: {str(e)}")
@@ -1407,13 +1609,17 @@ class ChatService:
         try:
             results = []
             
-            if not chat_type or chat_type == 'project':
-                project_results = self._search_project_messages(user_id, search_term, limit, offset)
-                results.extend(project_results)
-            
-            if not chat_type or chat_type == 'direct':
-                dm_results = self._search_direct_messages(user_id, organization_id, search_term, limit, offset)
-                results.extend(dm_results)
+            if not chat_type or chat_type == "project":
+                project_results = self._search_project_messages(
+                    user_id, search_term, limit, offset
+                )
+                results.extend(project_results.get("messages", []))
+
+            if not chat_type or chat_type == "direct":
+                dm_results = self._search_direct_messages(
+                    user_id, organization_id, search_term, limit, offset
+                )
+                results.extend(dm_results.get("messages", []))
             
             results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
@@ -1447,11 +1653,31 @@ class ChatService:
             NotificationSummaryResponse: The unread summary
         """
         try:
-            notifications_response = supabase.table('chat_notifications').select(
-                'unread_count, chat_type, reference_id, updated_at'
-            ).eq('user_id', str(user_id)).gt('unread_count', 0).execute()
-            
-            notifications = notifications_response.data if notifications_response.data else []
+            db = SyncSessionLocal()
+            try:
+                rows = db.execute(
+                    select(
+                        ChatNotification.unread_count,
+                        ChatNotification.chat_type,
+                        ChatNotification.reference_id,
+                        ChatNotification.updated_at,
+                    ).where(
+                        ChatNotification.user_id == user_id,
+                        ChatNotification.unread_count > 0,
+                    )
+                ).all()
+            finally:
+                db.close()
+
+            notifications = [
+                {
+                    "unread_count": r[0],
+                    "chat_type": r[1],
+                    "reference_id": str(r[2]),
+                    "updated_at": r[3].isoformat() if r[3] else None,
+                }
+                for r in rows
+            ]
             
             project_chats = []
             direct_messages = []
@@ -1461,15 +1687,17 @@ class ChatService:
                 total_unread += notif['unread_count']
                 
                 unread_count = UnreadCountResponse(
-                    chat_type=notif['chat_type'],
-                    reference_id=notif['reference_id'],
-                    reference_name=self._get_reference_name(notif['reference_id'], notif['chat_type']),
-                    unread_count=notif['unread_count'],
+                    chat_type=notif["chat_type"],
+                    reference_id=notif["reference_id"],
+                    reference_name=self._get_reference_name(
+                        notif["reference_id"], notif["chat_type"]
+                    ),
+                    unread_count=notif["unread_count"],
                     last_message_preview=None,
-                    last_message_at=notif.get('updated_at')
+                    last_message_at=notif.get("updated_at"),
                 )
                 
-                if notif['chat_type'] == 'project':
+                if notif["chat_type"] == "project":
                     project_chats.append(unread_count)
                 else:
                     direct_messages.append(unread_count)
@@ -1502,11 +1730,25 @@ class ChatService:
             
             # Update all attachments to link them to the message
             # Only update attachments that are currently unlinked (message_id is null)
-            attachment_id_strings = [str(att_id) for att_id in attachment_ids]
-            
-            supabase.table('chat_attachments').update({
-                'message_id': message_id
-            }).in_('id', attachment_id_strings).eq('message_type', message_type).is_('message_id', 'null').execute()
+            attachment_id_strings = [UUID4(str(a)) for a in attachment_ids]
+            mid = UUID4(str(message_id))
+            db = SyncSessionLocal()
+            try:
+                db.execute(
+                    update(ChatAttachment)
+                    .where(
+                        ChatAttachment.id.in_(attachment_id_strings),
+                        ChatAttachment.message_type == message_type,
+                        ChatAttachment.message_id.is_(None),
+                    )
+                    .values(message_id=mid)
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
             
             logger.info(f"Linked {len(attachment_ids)} attachments to {message_type} message {message_id}")
             
@@ -1651,62 +1893,82 @@ class ChatService:
     def _add_unread_count_to_conversation(self, conversation: Dict[str, Any], user_id: UUID4) -> None:
         """Add unread count to conversation"""
         try:
-            unread_response = supabase.table('chat_notifications').select('unread_count').eq(
-                'user_id', str(user_id)
-            ).eq('chat_type', 'direct').eq('reference_id', conversation['id']).execute()
-            
-            conversation['unread_count'] = unread_response.data[0]['unread_count'] if unread_response.data else 0
+            db = SyncSessionLocal()
+            try:
+                uc = db.execute(
+                    select(ChatNotification.unread_count).where(
+                        ChatNotification.user_id == user_id,
+                        ChatNotification.chat_type == "direct",
+                        ChatNotification.reference_id == UUID4(str(conversation["id"])),
+                    )
+                ).scalar_one_or_none()
+            finally:
+                db.close()
+            conversation["unread_count"] = uc if uc is not None else 0
         except Exception as e:
             logger.warning(f"Could not get unread count: {str(e)}")
             conversation['unread_count'] = 0
     
     def _get_conversation(self, conversation_id: UUID4, user_id: UUID4, organization_id: Optional[UUID4] = None) -> Dict[str, Any]:
         """Get and verify conversation access"""
-        query = supabase.table('chat_conversations').select(
-            'id, user1_id, user2_id, organization_id, last_message_at, created_at'
-        ).eq('id', str(conversation_id))
-        
-        # Filter by organization_id if provided
-        if organization_id:
-            query = query.eq('organization_id', str(organization_id))
-        
-        conversation_response = query.execute()
-        
-        if not conversation_response.data:
+        db = SyncSessionLocal()
+        try:
+            q = select(ChatConversation).where(ChatConversation.id == conversation_id)
+            if organization_id:
+                q = q.where(ChatConversation.organization_id == organization_id)
+            conv = db.execute(q).scalar_one_or_none()
+        finally:
+            db.close()
+
+        if not conv:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversation not found"
+                detail="Conversation not found",
             )
-        
-        conversation = conversation_response.data[0]
-        
-        # Verify user is a participant
-        if conversation['user1_id'] != str(user_id) and conversation['user2_id'] != str(user_id):
+
+        conversation = {
+            "id": str(conv.id),
+            "user1_id": str(conv.user1_id),
+            "user2_id": str(conv.user2_id),
+            "organization_id": str(conv.organization_id),
+            "last_message_at": conv.last_message_at.isoformat() if conv.last_message_at else None,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        }
+
+        if conversation["user1_id"] != str(user_id) and conversation["user2_id"] != str(user_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have access to this conversation"
+                detail="You do not have access to this conversation",
             )
-        
-        # Verify organization_id matches if provided
-        if organization_id and str(conversation['organization_id']) != str(organization_id):
+
+        if organization_id and str(conv.organization_id) != str(organization_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Conversation does not belong to this organization"
+                detail="Conversation does not belong to this organization",
             )
-        
+
         return conversation
     
     def _verify_same_organization(self, user1_id: UUID4, user2_id: UUID4, organization_id: UUID4) -> None:
         """Verify both users belong to the same organization"""
-        user1_response = supabase.table('organization_members').select('id').eq(
-            'user_id', str(user1_id)
-        ).eq('org_id', str(organization_id)).execute()
-        
-        user2_response = supabase.table('organization_members').select('id').eq(
-            'user_id', str(user2_id)
-        ).eq('org_id', str(organization_id)).execute()
-        
-        if not user1_response.data or not user2_response.data:
+        db = SyncSessionLocal()
+        try:
+            m1 = db.execute(
+                select(OrganizationMember.id).where(
+                    OrganizationMember.user_id == user1_id,
+                    OrganizationMember.org_id == organization_id,
+                )
+            ).first()
+            m2 = db.execute(
+                select(OrganizationMember.id).where(
+                    OrganizationMember.user_id == user2_id,
+                    OrganizationMember.org_id == organization_id,
+                )
+            ).first()
+        finally:
+            db.close()
+
+        if not m1 or not m2:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Both users must belong to the same organization"
@@ -1714,153 +1976,185 @@ class ChatService:
 
     def get_workspace_users(self, workspace_id: UUID4) -> List[Dict[str, Any]]:
         """Fetch all users in the workspace (organization). Selects only id, email, full_name, avatar_url."""
+        db = SyncSessionLocal()
         try:
-            members_response = supabase.table('organization_members').select('user_id').eq(
-                'org_id', str(workspace_id)
-            ).execute()
+            uids = db.execute(
+                select(OrganizationMember.user_id).where(
+                    OrganizationMember.org_id == workspace_id
+                )
+            ).scalars().all()
+            if not uids:
+                return []
+            uid_set = list({u for u in uids})
+            profiles = db.execute(
+                select(Profile).where(Profile.user_id.in_(uid_set))
+            ).scalars().all()
         except Exception as e:
             logger.error(f"Failed to get workspace members: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to fetch workspace users"
+                detail="Failed to fetch workspace users",
             )
-        if not members_response.data:
-            return []
-        user_ids = list({m['user_id'] for m in members_response.data})
-        try:
-            profiles_response = supabase.table('profiles').select(
-                'user_id, display_name, email, avatar_file_id'
-            ).in_('user_id', user_ids).execute()
-        except Exception as e:
-            logger.error(f"Failed to get profiles for workspace users: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to fetch workspace users"
-            )
+        finally:
+            db.close()
+
         result = []
-        for profile in (profiles_response.data or []):
+        for profile in profiles:
             avatar_url = None
-            if profile.get('avatar_file_id'):
+            if profile.avatar_file_id:
                 try:
-                    avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                    avatar_url = self.files_service.get_file_url(profile.avatar_file_id)
                 except Exception:
                     pass
-            result.append({
-                'id': profile['user_id'],
-                'email': profile.get('email'),
-                'full_name': profile.get('display_name'),
-                'avatar_url': avatar_url,
-            })
+            result.append(
+                {
+                    "id": str(profile.user_id),
+                    "email": profile.email,
+                    "full_name": profile.display_name,
+                    "avatar_url": avatar_url,
+                }
+            )
         return result
 
     def _search_project_messages(self, user_id: UUID4, search_term: str, limit: int, offset: int) -> Dict[str, Any]:
         """Search project messages accessible to user"""
         try:
-            query = supabase.table('project_members').select('project_id').eq(
-                'user_id', str(user_id)
-            )
-            
-            # apply pagination
-            limit, offset, query = apply_pagination(query, limit, offset)
-            
-            projects_response = query.execute()
-            
-            if not projects_response.data:
-                return []
-            
-            project_ids = [p.get('project_id') for p in projects_response.data if p.get('project_id')]
-            
-            results = []
-            all_messages = []
-            messages_count = 0
-            
-            # Use single query with IN clause across all projects (not limited to 10)
-            if project_ids:
-                # Convert to strings for IN clause
-                project_ids_str = [str(pid) for pid in project_ids]
-                messages_response = supabase.table('chat_messages').select(
-                    'id, body, user_id, project_id, created_at, read_by, message_type, deleted_at, attachments, reply_to_id, edited_at',
-                    count='exact'
-                ).in_('project_id', project_ids_str).textSearch(
-                    'search_vector', f"'{search_term}'"
-                ).is_('deleted_at', 'null').order('created_at', desc=True).limit(limit).execute()
-                
-                if messages_response.data:
-                    all_messages = messages_response.data
-                
-                # Get count from response if available
-                if hasattr(messages_response, 'count'):
-                    messages_count = messages_response.count
-                else:
-                    messages_count = len(all_messages)
-            
-            # Collect all unique user IDs for batch fetching
+            db = SyncSessionLocal()
+            try:
+                base_pm = select(ProjectMember.project_id).where(
+                    ProjectMember.user_id == user_id
+                )
+                lim, off, pm_stmt = apply_sa_limit_offset(base_pm, limit, offset)
+                project_ids = list(db.execute(pm_stmt).scalars().all())
+                limit, offset = lim, off
+
+                results = []
+                all_messages = []
+                messages_count = 0
+                if project_ids:
+                    base_msg = select(ChatMessage).where(
+                        ChatMessage.project_id.in_(project_ids),
+                        ChatMessage.deleted_at.is_(None),
+                        ChatMessage.search_vector.op("@@")(
+                            func.plainto_tsquery("english", search_term)
+                        ),
+                    )
+                    messages_count = db.execute(
+                        select(func.count()).select_from(base_msg.subquery())
+                    ).scalar_one()
+                    rows = db.execute(
+                        base_msg.order_by(ChatMessage.created_at.desc()).limit(limit)
+                    ).scalars().all()
+                    for m in rows:
+                        all_messages.append(
+                            {
+                                "id": str(m.id),
+                                "body": m.body,
+                                "user_id": str(m.user_id),
+                                "project_id": str(m.project_id),
+                                "created_at": m.created_at.isoformat() if m.created_at else None,
+                                "read_by": m.read_by,
+                                "message_type": m.message_type,
+                                "deleted_at": m.deleted_at.isoformat() if m.deleted_at else None,
+                                "attachments": m.attachments,
+                                "reply_to_id": str(m.reply_to_id) if m.reply_to_id else None,
+                                "edited_at": m.edited_at.isoformat() if m.edited_at else None,
+                            }
+                        )
+            finally:
+                db.close()
+
             user_ids = set()
             for msg in all_messages:
-                if msg.get('user_id'):
+                if msg.get("user_id"):
                     try:
-                        user_ids.add(UUID4(msg['user_id']))
+                        user_ids.add(UUID4(msg["user_id"]))
                     except Exception:
                         pass
-            
-            # Batch fetch all user info
+
             user_info_cache = {}
             if user_ids:
                 user_info_cache = self._batch_get_user_info(list(user_ids))
-            
-            # Enrich messages and build results
+
             for msg in all_messages:
-                user_id = msg.get('user_id')
-                if user_id:
-                    user_id_str = str(user_id)
-                    msg['user'] = user_info_cache.get(user_id_str) or {
-                        'id': user_id_str,
-                        'display_name': None,
-                        'avatar_url': None
+                uid = msg.get("user_id")
+                if uid:
+                    user_id_str = str(uid)
+                    msg["user"] = user_info_cache.get(user_id_str) or {
+                        "id": user_id_str,
+                        "display_name": None,
+                        "avatar_url": None,
                     }
                 else:
-                    msg['user'] = None
-                
-                # Use .get() for safety in case keys are missing
-                results.append({
-                    'message_id': msg.get('id'),
-                    'chat_type': 'project',
-                    'reference_id': msg.get('project_id'),
-                    'body': msg.get('body'),
-                    'user_id': msg.get('user_id'),
-                    'user': msg.get('user'),
-                    'created_at': msg.get('created_at'),
-                    'relevance_score': 1.0
-                })
-            
+                    msg["user"] = None
+
+                results.append(
+                    {
+                        "message_id": msg.get("id"),
+                        "chat_type": "project",
+                        "reference_id": msg.get("project_id"),
+                        "body": msg.get("body"),
+                        "user_id": msg.get("user_id"),
+                        "user": msg.get("user"),
+                        "created_at": msg.get("created_at"),
+                        "relevance_score": 1.0,
+                    }
+                )
+
             return {
-                'messages': results,
-                'total': messages_count,
-                'limit': limit,
-                'offset': offset
+                "messages": results,
+                "total": messages_count,
+                "limit": limit,
+                "offset": offset,
             }
         except Exception as e:
             logger.error(f"Error searching project messages: {str(e)}")
-            return []
+            return {"messages": [], "total": 0, "limit": limit, "offset": offset}
     
     def _search_direct_messages(self, user_id: UUID4, organization_id: UUID4, search_term: str, limit: int, offset: int) -> List[Dict]:
         """Search direct messages accessible to user"""
         try:
-            query = supabase.table('direct_messages').select(
-                'id, body, sender_id, receiver_id, created_at, deleted_at, message_type, attachments, read_at, organization_id',
-                count='exact'
-            ).or_(
-                f"sender_id.eq.{user_id},receiver_id.eq.{user_id}"
-            ).eq('organization_id', str(organization_id)).textSearch(
-                'search_vector', f"'{search_term}'"
-            ).is_('deleted_at', 'null')
-            
-            limit, offset, query = apply_pagination(query, limit, offset)
-            
-            messages_response = query.execute()            
-            
+            db = SyncSessionLocal()
+            try:
+                base = select(DirectMessage).where(
+                    DirectMessage.organization_id == organization_id,
+                    DirectMessage.deleted_at.is_(None),
+                    or_(
+                        DirectMessage.sender_id == user_id,
+                        DirectMessage.receiver_id == user_id,
+                    ),
+                    DirectMessage.search_vector.op("@@")(
+                        func.plainto_tsquery("english", search_term)
+                    ),
+                )
+                total = db.execute(
+                    select(func.count()).select_from(base.subquery())
+                ).scalar_one()
+                lim, off, page = apply_sa_limit_offset(
+                    base.order_by(DirectMessage.created_at.desc()), limit, offset
+                )
+                rows = db.execute(page).scalars().all()
+                limit, offset = lim, off
+                messages = []
+                for m in rows:
+                    messages.append(
+                        {
+                            "id": str(m.id),
+                            "body": m.body,
+                            "sender_id": str(m.sender_id),
+                            "receiver_id": str(m.receiver_id),
+                            "created_at": m.created_at.isoformat() if m.created_at else None,
+                            "deleted_at": m.deleted_at.isoformat() if m.deleted_at else None,
+                            "message_type": m.message_type,
+                            "attachments": m.attachments,
+                            "read_at": m.read_at.isoformat() if m.read_at else None,
+                            "organization_id": str(m.organization_id),
+                        }
+                    )
+            finally:
+                db.close()
+
             results = []
-            messages = messages_response.data if messages_response.data else []
             
             # Collect all unique sender and receiver IDs for batch fetching
             user_ids = set()
@@ -1919,34 +2213,37 @@ class ChatService:
                 })
             
             return {
-                'messages': results,
-                'total': messages_response.count,
-                'limit': limit,
-                'offset': offset
+                "messages": results,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
             }
         except Exception as e:
             logger.error(f"Error searching direct messages: {str(e)}")
-            return []
-    
+            return {"messages": [], "total": 0, "limit": limit, "offset": offset}
+
     def _get_reference_name(self, reference_id: str, chat_type: str) -> str:
         """Get name for reference (project name or user name)"""
         try:
-            if chat_type == 'project':
-                response = supabase.table('projects').select('name').eq('id', reference_id).execute()
-                return response.data[0]['name'] if response.data else 'Unknown Project'
-            else:
-                response = supabase.table('chat_conversations').select(
-                    'user1_id, user2_id'
-                ).eq('id', reference_id).execute()
-                if response.data:
-                    conv = response.data[0]
-                    user_id = conv.get('user2_id')
-                    if user_id:
-                        user_info = self._get_user_info_with_cache(UUID4(user_id))
-                        return user_info.get('display_name') or 'Unknown User'
-                    return 'Unknown User'
-                return 'Unknown User'
+            db = SyncSessionLocal()
+            try:
+                if chat_type == "project":
+                    name = db.execute(
+                        select(Project.name).where(Project.id == UUID4(str(reference_id)))
+                    ).scalar_one_or_none()
+                    return name or "Unknown Project"
+                conv = db.execute(
+                    select(ChatConversation.user2_id).where(
+                        ChatConversation.id == UUID4(str(reference_id))
+                    )
+                ).scalar_one_or_none()
+            finally:
+                db.close()
+            if conv:
+                user_info = self._get_user_info_with_cache(conv)
+                return user_info.get("display_name") or "Unknown User"
+            return "Unknown User"
         except Exception as e:
             logger.warning(f"Error getting reference name: {str(e)}")
-            return 'Unknown'
+            return "Unknown"
 

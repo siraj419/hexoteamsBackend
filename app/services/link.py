@@ -1,59 +1,68 @@
+from datetime import datetime, timezone
+from typing import Optional
+from uuid import UUID
+
 from fastapi import HTTPException, status
 from pydantic import UUID4
-from datetime import datetime, timezone
-from typing import List, Optional
+from sqlalchemy import delete, func, select, update
 
+from app.db.sync_session import SyncSessionLocal
+from app.models import Link as LinkModel
 from app.schemas.links import (
     LinkEntityType,
+    LinkGetPaginatedResponse,
     LinkRequest,
     LinkResponse,
     LinkUpdateRequest,
-    LinkGetPaginatedResponse,
 )
-from app.core import supabase
-from app.utils import calculate_time_ago, apply_pagination
+from app.utils import calculate_time_ago
 from app.utils.redis_cache import ProjectSummaryCache, cache_service
 
+
 class LinkService:
-    CACHE_TTL_LINKS = 180  # 3 minutes
-    
-    def __init__(self, user_timezone: str = 'utc'):
+    CACHE_TTL_LINKS = 180
+
+    def __init__(self, user_timezone: str = "utc"):
         self.user_timezone = user_timezone
-    
+
     def create_link(
         self,
         link_request: LinkRequest,
         entity_id: UUID4,
-        entity_type: LinkEntityType
+        entity_type: LinkEntityType,
     ) -> LinkResponse:
-        
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('links').insert({
-                'title': link_request.title,
-                'link_url': str(link_request.link_url),
-                'entity_id': str(entity_id),
-                'entity_type': entity_type.value,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
+            row = LinkModel(
+                title=link_request.title,
+                link_url=str(link_request.link_url),
+                entity_id=UUID(str(entity_id)),
+                entity_type=entity_type.value,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create link: {e}"
+                detail=f"Failed to create link: {e}",
             )
-        
-        # Invalidate link caches
+        finally:
+            db.close()
+
         cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
-        
         if entity_type == LinkEntityType.PROJECT:
             ProjectSummaryCache.delete_summary(str(entity_id))
-        
+
         return LinkResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            link_url=response.data[0]['link_url'],
-            created_time=calculate_time_ago(response.data[0]['created_at'], self.user_timezone),
+            id=str(row.id),
+            title=row.title,
+            link_url=row.link_url,
+            created_time=calculate_time_ago(row.created_at, self.user_timezone),
         )
-    
+
     def get_links(
         self,
         entity_id: UUID4,
@@ -61,170 +70,154 @@ class LinkService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> LinkGetPaginatedResponse:
-        """
-        Get links for an entity with pagination.
-        Optimized to fetch all data in a single query.
-        """
-        # Build cache key
         cache_key = f"links:list:{entity_type}:{entity_id}:{limit}:{offset}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return LinkGetPaginatedResponse(**cached)
-        
-        query = supabase.table('links').select('*', count='exact').eq('entity_id', str(entity_id)).eq('entity_type', entity_type.value).order('created_at', desc=True)
-        
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+
+        from app.core import settings as app_settings
+
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
+            filt = (LinkModel.entity_id == UUID(str(entity_id))) & (
+                LinkModel.entity_type == entity_type.value
+            )
+            total = db.execute(select(func.count()).select_from(LinkModel).where(filt)).scalar() or 0
+
+            stmt = select(LinkModel).where(filt).order_by(LinkModel.created_at.desc())
+            off = offset if offset is not None else app_settings.DEFAULT_PAGINATION_OFFSET
+            lim = limit if limit is not None else app_settings.DEFAULT_PAGINATION_LIMIT
+            stmt = stmt.offset(off).limit(lim)
+            rows = list(db.execute(stmt).scalars().all())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get links: {e}"
+                detail=f"Failed to get links: {e}",
             )
-        
-        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
-        
-        links = [LinkResponse(
-            id=link['id'],
-            title=link['title'],
-            link_url=link['link_url'],
-            created_time=calculate_time_ago(link['created_at'], self.user_timezone),
-        ) for link in response.data]
-        
+        finally:
+            db.close()
+
+        links = [
+            LinkResponse(
+                id=str(r.id),
+                title=r.title,
+                link_url=r.link_url,
+                created_time=calculate_time_ago(r.created_at, self.user_timezone),
+            )
+            for r in rows
+        ]
         result = LinkGetPaginatedResponse(
             links=links,
-            total=total_count,
-            offset=offset,
-            limit=limit,
+            total=total,
+            offset=off,
+            limit=lim,
         )
-        
-        # Cache the result
-        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_LINKS)
-        
+        cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL_LINKS)
         return result
-    
-    def update_link(
-        self,
-        link_id: UUID4,
-        link_request: LinkUpdateRequest,
-    ) -> LinkResponse:
-        """
-        Update a link. Optimized to fetch updated data in single query.
-        """
-        link_id_str = str(link_id)
-        
+
+    def update_link(self, link_id: UUID4, link_request: LinkUpdateRequest) -> LinkResponse:
+        link_id_u = UUID(str(link_id))
+        db = SyncSessionLocal()
         link_data = None
         try:
-            link_response = supabase.table('links').select('entity_id, entity_type').eq('id', link_id_str).execute()
-            if link_response.data and len(link_response.data) > 0:
-                link_data = link_response.data[0]
+            row = db.execute(select(LinkModel).where(LinkModel.id == link_id_u)).scalar_one_or_none()
+            if row:
+                link_data = {"entity_id": str(row.entity_id), "entity_type": row.entity_type}
+
+            updates = {}
+            if link_request.title is not None:
+                updates["title"] = link_request.title
+            if link_request.link_url is not None:
+                updates["link_url"] = str(link_request.link_url)
+            if not updates:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No updates provided",
+                )
+
+            res = db.execute(update(LinkModel).where(LinkModel.id == link_id_u).values(**updates))
+            db.commit()
+            if res.rowcount == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link not found")
+            row = db.execute(select(LinkModel).where(LinkModel.id == link_id_u)).scalar_one()
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as e:
-            pass
-        
-        updates = {}
-        if link_request.title is not None:
-            updates['title'] = link_request.title
-        if link_request.link_url is not None:
-            updates['link_url'] = str(link_request.link_url)
-        
-        if not updates:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No updates provided"
-            )
-                
-        try:
-            response = supabase.table('links').update(updates).eq('id', link_id_str).execute()
-        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update link: {e}"
+                detail=f"Failed to update link: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Link not found"
-            )
-        
-        # Invalidate link caches
+        finally:
+            db.close()
+
         if link_data:
-            entity_type = link_data.get('entity_type')
-            entity_id = link_data.get('entity_id')
-            cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
-            
-            if entity_type == LinkEntityType.PROJECT.value:
-                ProjectSummaryCache.delete_summary(entity_id)
-        
+            cache_service.invalidate_pattern(
+                f"links:list:{link_data['entity_type']}:{link_data['entity_id']}:*"
+            )
+            if link_data["entity_type"] == LinkEntityType.PROJECT.value:
+                ProjectSummaryCache.delete_summary(link_data["entity_id"])
+
         return LinkResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            link_url=response.data[0]['link_url'],
-            created_time=calculate_time_ago(response.data[0]['created_at'], self.user_timezone),
+            id=str(row.id),
+            title=row.title,
+            link_url=row.link_url,
+            created_time=calculate_time_ago(row.created_at, self.user_timezone),
         )
-    
-    def delete_link(
-        self,
-        link_id: UUID4,
-    ) -> bool:
-        """
-        Delete a link. Optimized single query operation.
-        """
-        link_id_str = str(link_id)
-        
+
+    def delete_link(self, link_id: UUID4) -> bool:
+        link_id_u = UUID(str(link_id))
+        db = SyncSessionLocal()
         link_data = None
         try:
-            link_response = supabase.table('links').select('entity_id, entity_type').eq('id', link_id_str).execute()
-            if link_response.data and len(link_response.data) > 0:
-                link_data = link_response.data[0]
+            row = db.execute(select(LinkModel).where(LinkModel.id == link_id_u)).scalar_one_or_none()
+            if row:
+                link_data = {"entity_id": str(row.entity_id), "entity_type": row.entity_type}
+            res = db.execute(delete(LinkModel).where(LinkModel.id == link_id_u))
+            db.commit()
+            if res.rowcount == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Link not found")
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as e:
-            pass
-        
-        try:
-            response = supabase.table('links').delete().eq('id', link_id_str).execute()
-        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete link: {e}"
+                detail=f"Failed to delete link: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Link not found"
-            )
-        
-        # Invalidate link caches
+        finally:
+            db.close()
+
         if link_data:
-            entity_type = link_data.get('entity_type')
-            entity_id = link_data.get('entity_id')
-            cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
-            
-            if entity_type == LinkEntityType.PROJECT.value:
-                ProjectSummaryCache.delete_summary(entity_id)
-        
+            cache_service.invalidate_pattern(
+                f"links:list:{link_data['entity_type']}:{link_data['entity_id']}:*"
+            )
+            if link_data["entity_type"] == LinkEntityType.PROJECT.value:
+                ProjectSummaryCache.delete_summary(link_data["entity_id"])
         return True
 
-    def delete_all(
-        self,
-        entity_id: UUID4,
-        entity_type: LinkEntityType,
-    ) -> bool:
+    def delete_all(self, entity_id: UUID4, entity_type: LinkEntityType) -> bool:
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('links').delete().eq('entity_id', str(entity_id)).eq('entity_type', entity_type.value).execute()
+            db.execute(
+                delete(LinkModel).where(
+                    LinkModel.entity_id == UUID(str(entity_id)),
+                    LinkModel.entity_type == entity_type.value,
+                )
+            )
+            db.commit()
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete all links: {e}"
+                detail=f"Failed to delete all links: {e}",
             )
-        
-        # Invalidate link caches
+        finally:
+            db.close()
+
         cache_service.invalidate_pattern(f"links:list:{entity_type}:{entity_id}:*")
-        
         if entity_type == LinkEntityType.PROJECT:
             ProjectSummaryCache.delete_summary(str(entity_id))
-            
         return True

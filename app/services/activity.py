@@ -1,27 +1,86 @@
+import logging
+from datetime import datetime, timezone
+from typing import Any, List, Optional
+from uuid import UUID
+
 from fastapi import HTTPException, status
 from pydantic import UUID4
-from typing import List, Optional
-from datetime import datetime, timezone
-import logging
+from sqlalchemy import and_, delete, func, select
 
+from app.db.sync_session import SyncSessionLocal
+from app.models import Activity, Profile, Task
 from app.schemas.activities import (
-    ActivityType,
-    ActivityResponse,
     ActivityGetPaginatedResponse,
+    ActivityResponse,
+    ActivityType,
 )
 from app.services.files import FilesService
-from app.core import supabase
-from app.utils import calculate_time_ago, apply_pagination
+from app.utils import calculate_time_ago
 from app.utils.redis_cache import ProjectSummaryCache, cache_service
+from app.utils.sa_pagination import apply_sa_limit_offset
 
 logger = logging.getLogger(__name__)
 
+
+def _profile_join_stmt(base_filter):
+    return (
+        select(Activity, Profile.display_name, Profile.avatar_file_id, Profile.timezone)
+        .join(Profile, Profile.id == Activity.actor_profile_id)
+        .where(base_filter)
+        .order_by(Activity.created_at.desc())
+    )
+
+
+def _rows_to_activity_responses(
+    rows: List[Any],
+    files_service: FilesService,
+) -> List[ActivityResponse]:
+    out: List[ActivityResponse] = []
+    for activity, display_name, avatar_file_id, tz in rows:
+        avatar_url = None
+        if avatar_file_id:
+            try:
+                avatar_url = files_service.get_file_url(avatar_file_id)
+            except Exception:
+                pass
+        tz_s = (tz or "utc").lower()
+        out.append(
+            ActivityResponse(
+                id=activity.id,
+                user_display_name=display_name or "Unknown",
+                user_avatar_url=avatar_url,
+                description=activity.description or "",
+                activity_time=calculate_time_ago(activity.created_at, tz_s),
+            )
+        )
+    return out
+
+
+def _merged_dicts_from_rows(rows):
+    merged = []
+    for activity, display_name, avatar_file_id, tz in rows:
+        merged.append(
+            {
+                "id": activity.id,
+                "description": activity.description,
+                "created_at": activity.created_at,
+                "activity_type": activity.activity_type,
+                "profiles": {
+                    "display_name": display_name,
+                    "avatar_file_id": str(avatar_file_id) if avatar_file_id else None,
+                    "timezone": tz or "utc",
+                },
+            }
+        )
+    return merged
+
+
 class ActivityService:
-    CACHE_TTL_ACTIVITIES = 120  # 2 minutes
-    
+    CACHE_TTL_ACTIVITIES = 120
+
     def __init__(self, files_service: FilesService):
         self.files_service = files_service
-        
+
     def add_activity(
         self,
         activity_type: ActivityType,
@@ -29,57 +88,55 @@ class ActivityService:
         actor_id: UUID4,
         description: str,
     ):
-        # Get the profile ID (primary key) from the user_id
         try:
-            profile_response = supabase.table('profiles').select('id').eq('user_id', str(actor_id)).execute()
-            if not profile_response.data or len(profile_response.data) == 0:
-                logger.warning(f"Profile not found for user_id {actor_id}, skipping activity insertion")
-                return
-            profile_id = profile_response.data[0]['id']
+            db = SyncSessionLocal()
+            try:
+                profile_id = db.execute(
+                    select(Profile.id).where(Profile.user_id == UUID(str(actor_id)))
+                ).scalar_one_or_none()
+                if not profile_id:
+                    logger.warning(
+                        "Profile not found for user_id %s, skipping activity insertion", actor_id
+                    )
+                    return
+                act = Activity(
+                    entity_id=UUID(str(entity_id)),
+                    actor_profile_id=profile_id,
+                    activity_type=activity_type.value,
+                    description=description,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(act)
+                db.commit()
+            finally:
+                db.close()
         except Exception as e:
-            logger.error(f"Failed to get profile ID for user_id {actor_id}: {str(e)}", exc_info=True)
-            return
-        
-        # insert the activity into the unified activities table with activity_type field
-        try:
-            insert_data = {
-                'entity_id': str(entity_id),
-                'actor_profile_id': str(profile_id),
-                'activity_type': activity_type.value,
-                'description': description,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-            }
-            response = supabase.table('activities').insert(insert_data).execute()
-            logger.info(f"Activity inserted successfully: {response.data if hasattr(response, 'data') else 'No data returned'}")
-        except Exception as e:
-            logger.error(f"Failed to add activity: {str(e)}", exc_info=True)
+            logger.error("Failed to add activity: %s", e, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to add activity: {str(e)}"
+                detail=f"Failed to add activity: {e!s}",
             )
-        
-        # Invalidate activity caches
+
         cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
         cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
-        
-        # Invalidate project summary cache for activities
+
         if activity_type == ActivityType.PROJECT:
-            # Project activity - invalidate cache for the project
             ProjectSummaryCache.delete_summary(str(entity_id))
         elif activity_type == ActivityType.TASK:
-            # Task activity - get project_id from task and invalidate cache
             try:
-                task_response = supabase.table('tasks').select('project_id').eq('id', str(entity_id)).execute()
-                if task_response.data and len(task_response.data) > 0:
-                    project_id = task_response.data[0].get('project_id')
-                    if project_id:
-                        ProjectSummaryCache.delete_summary(str(project_id))
-                        cache_service.invalidate_pattern(f"activities:list:{project_id}:*")
-                        cache_service.invalidate_pattern(f"activities:paginated:{project_id}:*")
+                db = SyncSessionLocal()
+                try:
+                    pid = db.execute(
+                        select(Task.project_id).where(Task.id == UUID(str(entity_id)))
+                    ).scalar_one_or_none()
+                finally:
+                    db.close()
+                if pid:
+                    ProjectSummaryCache.delete_summary(str(pid))
+                    cache_service.invalidate_pattern(f"activities:list:{pid}:*")
+                    cache_service.invalidate_pattern(f"activities:paginated:{pid}:*")
             except Exception as e:
-                logger.warning(f"Failed to get project_id for task activity: {str(e)}")
-        
-        return
+                logger.warning("Failed to get project_id for task activity: %s", e)
 
     def get_activities(
         self,
@@ -88,122 +145,110 @@ class ActivityService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> List[ActivityResponse]:
-        # Build cache key
         cache_key = f"activities:list:{entity_id}:{activity_type}:{limit}:{offset}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return [ActivityResponse(**item) for item in cached]
-        
-        # For task activities: get only activities with activity_type='task' for that task
-        # For project activities: get both activity_type='project' for project AND activity_type='task' for tasks in that project
+
+        eid = UUID(str(entity_id))
+
         if activity_type == ActivityType.TASK:
-            query = supabase.table('activities').select(
-                'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)'
-            ).eq('entity_id', str(entity_id)).eq('activity_type', 'task').order('created_at', desc=True)
-        else:
-            # For project activities, get all task IDs for this project first
+            base = and_(Activity.entity_id == eid, Activity.activity_type == "task")
             try:
-                tasks_response = supabase.table('tasks').select('id').eq('project_id', str(entity_id)).execute()
-                task_ids = [str(task['id']) for task in tasks_response.data] if tasks_response.data else []
-            except Exception as e:
-                logger.error(f"Failed to get tasks for project {entity_id}: {str(e)}")
-                task_ids = []
-            
-            # Get project activities and task activities separately, then combine
-            all_activities = []
-            
-            # Get project activities (no pagination yet, we'll combine and paginate after)
-            try:
-                project_activities = supabase.table('activities').select(
-                    'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)'
-                ).eq('entity_id', str(entity_id)).eq('activity_type', 'project').order('created_at', desc=True).execute()
-                if project_activities.data:
-                    all_activities.extend(project_activities.data)
-            except Exception as e:
-                logger.error(f"Failed to get project activities: {str(e)}")
-            
-            # Get task activities for tasks in this project (no pagination yet)
-            if task_ids:
+                db = SyncSessionLocal()
                 try:
-                    task_activities = supabase.table('activities').select(
-                        'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)'
-                    ).eq('activity_type', 'task').in_('entity_id', task_ids).order('created_at', desc=True).execute()
-                    if task_activities.data:
-                        all_activities.extend(task_activities.data)
-                except Exception as e:
-                    logger.error(f"Failed to get task activities: {str(e)}")
-            
-            # Sort by created_at descending and apply pagination manually
-            all_activities.sort(key=lambda x: x['created_at'], reverse=True)
-            
-            # Apply pagination
-            total_count = len(all_activities)
-            if offset is not None and limit is not None:
-                all_activities = all_activities[offset:offset + limit]
-            elif offset is not None:
-                all_activities = all_activities[offset:]
-            elif limit is not None:
-                all_activities = all_activities[:limit]
-            
-            activities = []
-            for activity in all_activities:
-                avatar_url = None
-                profile = activity.get('profiles', {})
-                if profile and profile.get('avatar_file_id'):
-                    try:
-                        avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
-                    except Exception:
-                        pass
-                    
-                activities.append(ActivityResponse(
-                    id=activity['id'],
-                    user_display_name=profile.get('display_name', 'Unknown') if profile else 'Unknown',
-                    user_avatar_url=avatar_url,
-                    description=activity['description'],
-                    activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
-                ))
-            
-            # Cache the result
-            cache_service.set(cache_key, [a.model_dump(mode='json') for a in activities], ttl=self.CACHE_TTL_ACTIVITIES)
-            
+                    stmt = _profile_join_stmt(base)
+                    _, off, stmt = apply_sa_limit_offset(stmt, limit, offset)
+                    rows = db.execute(stmt).all()
+                finally:
+                    db.close()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to get activities: {e!s}",
+                )
+            activities = _rows_to_activity_responses(rows, self.files_service)
+            cache_service.set(
+                cache_key,
+                [a.model_dump(mode="json") for a in activities],
+                ttl=self.CACHE_TTL_ACTIVITIES,
+            )
             return activities
-        
-        # apply the pagination
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+
         try:
-            response = query.execute()
+            db = SyncSessionLocal()
+            try:
+                task_ids = list(
+                    db.execute(select(Task.id).where(Task.project_id == eid)).scalars().all()
+                )
+                all_rows = []
+                all_rows.extend(
+                    db.execute(
+                        _profile_join_stmt(
+                            and_(Activity.entity_id == eid, Activity.activity_type == "project")
+                        )
+                    ).all()
+                )
+                if task_ids:
+                    all_rows.extend(
+                        db.execute(
+                            _profile_join_stmt(
+                                and_(
+                                    Activity.activity_type == "task",
+                                    Activity.entity_id.in_(task_ids),
+                                )
+                            )
+                        ).all()
+                    )
+            finally:
+                db.close()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get activities: {e}"
+                detail=f"Failed to get activities: {e!s}",
             )
-        
+
+        merged = _merged_dicts_from_rows(all_rows)
+        merged.sort(key=lambda x: x["created_at"], reverse=True)
+
+        if offset is not None and limit is not None:
+            merged = merged[offset : offset + limit]
+        elif offset is not None:
+            merged = merged[offset:]
+        elif limit is not None:
+            merged = merged[:limit]
+
         activities = []
-        for activity in response.data:
+        for activity in merged:
             avatar_url = None
-            profile = activity.get('profiles', {})
-            if profile and profile.get('avatar_file_id'):
+            profile = activity.get("profiles", {})
+            if profile and profile.get("avatar_file_id"):
                 try:
-                    avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                    avatar_url = self.files_service.get_file_url(
+                        UUID(profile["avatar_file_id"])
+                    )
                 except Exception:
                     pass
-                
-            activities.append(ActivityResponse(
-                id=activity['id'],
-                user_display_name=profile.get('display_name', 'Unknown') if profile else 'Unknown',
-                user_avatar_url=avatar_url,
-                description=activity['description'],
-                    activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
-            ))
-        
-        # Cache the result
-        cache_service.set(cache_key, [a.model_dump(mode='json') for a in activities], ttl=self.CACHE_TTL_ACTIVITIES)
-        
+            activities.append(
+                ActivityResponse(
+                    id=activity["id"],
+                    user_display_name=profile.get("display_name", "Unknown") if profile else "Unknown",
+                    user_avatar_url=avatar_url,
+                    description=activity["description"],
+                    activity_time=calculate_time_ago(
+                        activity["created_at"],
+                        profile.get("timezone", "utc") if profile else "utc",
+                    ),
+                )
+            )
+
+        cache_service.set(
+            cache_key,
+            [a.model_dump(mode="json") for a in activities],
+            ttl=self.CACHE_TTL_ACTIVITIES,
+        )
         return activities
-    
+
     def get_activities_paginated(
         self,
         entity_id: UUID4,
@@ -211,186 +256,183 @@ class ActivityService:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> ActivityGetPaginatedResponse:
-        """
-        Get paginated activities for an entity.
-        For tasks: returns only task activities (activity_type='task')
-        For projects: returns both project activities and task activities for tasks in that project
-        Optimized to fetch all data in a single query with profile join.
-        """
-        # Build cache key
         cache_key = f"activities:paginated:{entity_id}:{activity_type}:{limit}:{offset}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return ActivityGetPaginatedResponse(**cached)
-        
+
+        eid = UUID(str(entity_id))
+
         if activity_type == ActivityType.TASK:
-            # Get only task activities for this task
-            query = supabase.table('activities').select(
-                'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)',
-                count='exact'
-            ).eq('entity_id', str(entity_id)).eq('activity_type', 'task').order('created_at', desc=True)
-        else:
-            # For project activities, get all task IDs for this project first
+            base = and_(Activity.entity_id == eid, Activity.activity_type == "task")
             try:
-                tasks_response = supabase.table('tasks').select('id').eq('project_id', str(entity_id)).execute()
-                task_ids = [str(task['id']) for task in tasks_response.data] if tasks_response.data else []
-            except Exception as e:
-                logger.error(f"Failed to get tasks for project {entity_id}: {str(e)}")
-                task_ids = []
-            
-            # Get project activities and task activities separately, then combine
-            all_activities = []
-            
-            # Get project activities (no pagination yet, we'll combine and paginate after)
-            try:
-                project_activities = supabase.table('activities').select(
-                    'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)'
-                ).eq('entity_id', str(entity_id)).eq('activity_type', 'project').order('created_at', desc=True).execute()
-                if project_activities.data:
-                    all_activities.extend(project_activities.data)
-            except Exception as e:
-                logger.error(f"Failed to get project activities: {str(e)}")
-            
-            # Get task activities for tasks in this project (no pagination yet)
-            if task_ids:
+                db = SyncSessionLocal()
                 try:
-                    task_activities = supabase.table('activities').select(
-                        'id, description, created_at, activity_type, profiles(display_name, avatar_file_id, timezone)'
-                    ).eq('activity_type', 'task').in_('entity_id', task_ids).order('created_at', desc=True).execute()
-                    if task_activities.data:
-                        all_activities.extend(task_activities.data)
-                except Exception as e:
-                    logger.error(f"Failed to get task activities: {str(e)}")
-            
-            # Sort by created_at descending (merge sort since both are already sorted)
-            all_activities.sort(key=lambda x: x['created_at'], reverse=True)
-            
-            # Apply pagination manually
-            total_count = len(all_activities)
-            if offset is not None and limit is not None:
-                all_activities = all_activities[offset:offset + limit]
-            elif offset is not None:
-                all_activities = all_activities[offset:]
-            elif limit is not None:
-                all_activities = all_activities[:limit]
-            
+                    total_count = int(
+                        db.execute(
+                            select(func.count()).select_from(Activity).where(base)
+                        ).scalar_one()
+                    )
+                    stmt = _profile_join_stmt(base)
+                    lim, off, stmt = apply_sa_limit_offset(stmt, limit, offset)
+                    rows = db.execute(stmt).all()
+                finally:
+                    db.close()
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to get activities: {e!s}",
+                )
             activities = []
-            for activity in all_activities:
+            for activity, display_name, avatar_file_id, tz in rows:
                 avatar_url = None
-                profile = activity.get('profiles', {})
-                if profile and profile.get('avatar_file_id'):
+                if avatar_file_id:
                     try:
-                        avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                        avatar_url = self.files_service.get_file_url(avatar_file_id)
                     except Exception:
                         pass
-                    
-                activities.append(ActivityResponse(
-                    id=activity['id'],
-                    user_display_name=profile.get('display_name', '') if profile else '',
-                    user_avatar_url=avatar_url,
-                    description=activity['description'],
-                    activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
-                ))
-            
+                activities.append(
+                    ActivityResponse(
+                        id=activity.id,
+                        user_display_name=display_name or "",
+                        user_avatar_url=avatar_url,
+                        description=activity.description or "",
+                        activity_time=calculate_time_ago(
+                            activity.created_at, (tz or "utc").lower()
+                        ),
+                    )
+                )
             result = ActivityGetPaginatedResponse(
                 activities=activities,
                 total=total_count,
-                offset=offset,
-                limit=limit,
+                offset=off,
+                limit=lim,
             )
-            
-            # Cache the result
-            cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ACTIVITIES)
-            
+            cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL_ACTIVITIES)
             return result
-        
-        # For task activities, use the query approach
-        # apply the pagination
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+
         try:
-            response = query.execute()
+            db = SyncSessionLocal()
+            try:
+                task_ids = list(
+                    db.execute(select(Task.id).where(Task.project_id == eid)).scalars().all()
+                )
+                all_rows = []
+                all_rows.extend(
+                    db.execute(
+                        _profile_join_stmt(
+                            and_(Activity.entity_id == eid, Activity.activity_type == "project")
+                        )
+                    ).all()
+                )
+                if task_ids:
+                    all_rows.extend(
+                        db.execute(
+                            _profile_join_stmt(
+                                and_(
+                                    Activity.activity_type == "task",
+                                    Activity.entity_id.in_(task_ids),
+                                )
+                            )
+                        ).all()
+                    )
+            finally:
+                db.close()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get activities: {e}"
+                detail=f"Failed to get activities: {e!s}",
             )
-        
-        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
-        
+
+        merged = _merged_dicts_from_rows(all_rows)
+        merged.sort(key=lambda x: x["created_at"], reverse=True)
+        total_count = len(merged)
+
+        if offset is not None and limit is not None:
+            merged = merged[offset : offset + limit]
+        elif offset is not None:
+            merged = merged[offset:]
+        elif limit is not None:
+            merged = merged[:limit]
+
         activities = []
-        for activity in response.data:
+        for activity in merged:
             avatar_url = None
-            profile = activity.get('profiles', {})
-            if profile and profile.get('avatar_file_id'):
+            profile = activity.get("profiles", {})
+            if profile and profile.get("avatar_file_id"):
                 try:
-                    avatar_url = self.files_service.get_file_url(profile['avatar_file_id'])
+                    avatar_url = self.files_service.get_file_url(
+                        UUID(profile["avatar_file_id"])
+                    )
                 except Exception:
                     pass
-                
-            activities.append(ActivityResponse(
-                id=activity['id'],
-                user_display_name=profile.get('display_name', '') if profile else '',
-                user_avatar_url=avatar_url,
-                description=activity['description'],
-                activity_time=calculate_time_ago(activity['created_at'], profile.get('timezone', 'utc') if profile else 'utc'),
-            ))
-        
+            activities.append(
+                ActivityResponse(
+                    id=activity["id"],
+                    user_display_name=profile.get("display_name", "") if profile else "",
+                    user_avatar_url=avatar_url,
+                    description=activity["description"],
+                    activity_time=calculate_time_ago(
+                        activity["created_at"],
+                        profile.get("timezone", "utc") if profile else "utc",
+                    ),
+                )
+            )
+
         result = ActivityGetPaginatedResponse(
             activities=activities,
             total=total_count,
             offset=offset,
             limit=limit,
         )
-        
-        # Cache the result
-        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL_ACTIVITIES)
-        
+        cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL_ACTIVITIES)
         return result
 
-    def delete_activity(
-        self,
-        activity_id: UUID4,
-    ) -> bool:
-        # Get activity to find entity_id for cache invalidation
+    def delete_activity(self, activity_id: UUID4) -> bool:
+        entity_id = None
         try:
-            activity_response = supabase.table('activities').select('entity_id, activity_type').eq('id', str(activity_id)).execute()
-            entity_id = activity_response.data[0]['entity_id'] if activity_response.data else None
-        except:
-            entity_id = None
-        
-        try:
-            supabase.table('activities').delete().eq('id', activity_id).execute()
+            db = SyncSessionLocal()
+            try:
+                row = db.execute(
+                    select(Activity.entity_id).where(Activity.id == UUID(str(activity_id)))
+                ).first()
+                if row:
+                    entity_id = row[0]
+                db.execute(delete(Activity).where(Activity.id == UUID(str(activity_id))))
+                db.commit()
+            finally:
+                db.close()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete activity: {e}"
+                detail=f"Failed to delete activity: {e!s}",
             )
-        
-        # Invalidate activity caches
+
         if entity_id:
             cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
             cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
-        
         return True
-    
-    def delete_all(
-        self,
-        entity_id: UUID4,
-        activity_type: ActivityType,
-    ) -> bool:
+
+    def delete_all(self, entity_id: UUID4, activity_type: ActivityType) -> bool:
+        eid = UUID(str(entity_id))
         try:
-            supabase.table('activities').delete().eq('entity_id', str(entity_id)).eq('activity_type', activity_type.value).execute()
+            db = SyncSessionLocal()
+            try:
+                db.execute(
+                    delete(Activity).where(
+                        Activity.entity_id == eid,
+                        Activity.activity_type == activity_type.value,
+                    )
+                )
+                db.commit()
+            finally:
+                db.close()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete all activities: {e}"
+                detail=f"Failed to delete all activities: {e!s}",
             )
-        
-        # Invalidate activity caches
+
         cache_service.invalidate_pattern(f"activities:list:{entity_id}:*")
         cache_service.invalidate_pattern(f"activities:paginated:{entity_id}:*")
-        
         return True

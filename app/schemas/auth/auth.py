@@ -52,8 +52,9 @@ class AuthForgetPasswordRequest(BaseModel):
     redirect_to: Optional[str] = None
 
 class AuthResetPasswordRequest(ValidatedPassword):
+    """access_token is the password-reset JWT; refresh_token is unused."""
     access_token: str
-    refresh_token: str
+    refresh_token: str = ""
 
 class User(BaseModel):
     id: str
@@ -70,9 +71,10 @@ class AuthLogoutResponse(BaseModel):
     message: str
 
 class AuthConfirmRequest(BaseModel):
+    """access_token is the email-verification JWT; refresh_token is unused (legacy field)."""
     access_token: str
-    access_token_expires_in: int
-    refresh_token: str
+    access_token_expires_in: int = 0
+    refresh_token: str = ""
 
 
 # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

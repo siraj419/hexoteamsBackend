@@ -1,26 +1,29 @@
-from fastapi import HTTPException, status
-from pydantic import UUID4
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from supabase_auth.errors import AuthApiError
-import os
 import logging
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+from uuid import UUID as PyUUID
 
-from app.core import supabase
-from app.core.s3 import s3_service, S3ServiceException
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
+from pydantic import UUID4
+from sqlalchemy import and_, delete, func, select, update
 
-logger = logging.getLogger(__name__)
-
+from app.core.s3 import S3ServiceException, s3_service
+from app.db.sync_session import SyncSessionLocal
+from app.models import ChatAttachment, ChatMessage, DirectMessage, File as FileModel, Profile, ProjectMember
 from app.schemas.files import (
     FileBaseResponse,
     FileBaseResponseWithUploaderId,
-    FileUploadedByUserGetResponse,
-    FileGetResponseWithUser,
     FileGetPaginatedResponseWithUploaders,
+    FileGetResponseWithUser,
+    FileUploadedByUserGetResponse,
 )
-from app.utils import calculate_file_size, apply_pagination
-from app.utils.redis_cache import cache_service, UserCache
+from app.utils import calculate_file_size
+from app.utils.redis_cache import UserCache, cache_service
+from app.utils.sa_pagination import apply_sa_limit_offset
+
+logger = logging.getLogger(__name__)
 
 class FilesService:
     CACHE_TTL_FILE = 300  # 5 minutes for single file
@@ -37,155 +40,154 @@ class FilesService:
         project_id: Optional[UUID4] = None,
         task_id: Optional[UUID4] = None,
     ) -> FileBaseResponse:
-        # validate the file
         if not self.s3_service.validate_file_extension(file.filename):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file extension")
-        
+
         if not self.s3_service.validate_file_size(file.size):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File size exceeds the maximum allowed size")
-            
-        # store the file in the database
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size exceeds the maximum allowed size",
+            )
+
+        now = datetime.now(timezone.utc)
+        row = FileModel(
+            name=file.filename or "unnamed",
+            size_bytes=file.size or 0,
+            content_type=file.content_type,
+            uploaded_by=PyUUID(str(user_id)),
+            org_id=PyUUID(str(org_id)) if org_id else None,
+            project_id=PyUUID(str(project_id)) if project_id else None,
+            task_id=PyUUID(str(task_id)) if task_id else None,
+            created_at=now,
+        )
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").insert({
-                "name": file.filename,
-                "size_bytes": file.size,
-                "content_type": file.content_type,
-                "uploaded_by": str(user_id),
-                "org_id": str(org_id) if org_id else None,
-                "project_id": str(project_id) if project_id else None,
-                "task_id": str(task_id) if task_id else None,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        except AuthApiError as e:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create file record in database: {e}"
+                detail=f"Failed to create file record in database: {e!s}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create file: no data returned"
-            )
-        
-        # Extract file extension from original filename
-        file_extension = os.path.splitext(file.filename)[1]  # Gets extension with dot (e.g., '.jpg')
-        file_id = str(response.data[0]["id"])
-        s3_key = f"{file_id}{file_extension}"
-        
-        # reset file pointer to beginning (in case validations read it)
+        finally:
+            db.close()
+
+        file_extension = os.path.splitext(file.filename or "")[1]
+        file_id_str = str(row.id)
+        s3_key = f"{file_id_str}{file_extension}"
         file.file.seek(0)
-        
-        # upload the file to S3 with extension
         try:
             self.s3_service.upload_file(
                 file=file.file,
                 key=s3_key,
-                content_type=file.content_type
+                content_type=file.content_type,
             )
         except (S3ServiceException, Exception) as e:
-            # If upload fails, delete the database record that was inserted
+            db = SyncSessionLocal()
             try:
-                supabase.table("files").delete().eq("id", file_id).execute()
-                logger.warning(f"Deleted file record {file_id} after failed S3 upload: {str(e)}")
+                db.delete(row)
+                db.commit()
             except Exception as delete_err:
-                logger.error(f"Failed to delete file record {file_id} after upload failure: {str(delete_err)}")
-            
-            # Return 500 error instead of raising exception
-            logger.error(f"Failed to upload file to S3/MinIO: {str(e)}")
+                logger.error("Failed to delete file record after upload failure: %s", delete_err)
+            finally:
+                db.close()
+            logger.error("Failed to upload file to S3/MinIO: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to upload file to storage. Please try again later."
+                detail="Failed to upload file to storage. Please try again later.",
             )
-        
-        # get user profile
+
+        db = SyncSessionLocal()
         try:
-            uploaded_by = response.data[0].get('uploaded_by')
-            if not uploaded_by:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="File record missing uploaded_by field"
-                )
-            user_profile = supabase.table("profiles").select("display_name").eq("user_id", uploaded_by).execute()
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get user profile: {e}"
+            has_profile = (
+                db.execute(
+                    select(Profile.id).where(Profile.user_id == PyUUID(str(user_id)))
+                ).first()
+                is not None
             )
-        
-        if not user_profile.data or len(user_profile.data) == 0:
+        finally:
+            db.close()
+        if not has_profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="User profile not found"
+                detail="User profile not found",
             )
-        
+
         file_response = FileBaseResponse(
-            id=response.data[0]['id'],
-            name=response.data[0]['name'],
-            size=calculate_file_size(response.data[0]['size_bytes']),
-            content_type=response.data[0]['content_type'],
-            uploaded_by=response.data[0]['uploaded_by'],
-            is_deleted=response.data[0]['is_deleted'],
+            id=row.id,
+            name=row.name,
+            size=calculate_file_size(row.size_bytes),
+            content_type=row.content_type,
+            uploaded_by=row.uploaded_by,
+            is_deleted=row.is_deleted,
         )
-        
-        # Invalidate file list caches
         cache_service.invalidate_pattern("files:list:*")
-        
         return file_response
     
     def update_file(self, file_id: UUID4, file: UploadFile) -> Dict[str, Any]:
-        # validate the file
         if not self.s3_service.validate_file_extension(file.filename):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file extension")
-        
+
         if not self.s3_service.validate_file_size(file.size):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File size exceeds the maximum allowed size")
-        
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size exceeds the maximum allowed size",
+            )
+
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").update({
-                "name": file.filename,
-                "size_bytes": file.size,
-                "content_type": file.content_type,
-            }).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="File not found or update failed",
+                )
+            row.name = file.filename or row.name
+            row.size_bytes = file.size or 0
+            row.content_type = file.content_type
+            db.commit()
+            db.refresh(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update file record from database: {e}"
+                detail=f"Failed to update file record from database: {e!s}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found or update failed"
-            )
-        
-        # Extract file extension from original filename
-        file_extension = os.path.splitext(file.filename)[1]  # Gets extension with dot (e.g., '.jpg')
-        file_id = str(response.data[0]["id"])
-        s3_key = f"{file_id}{file_extension}"
-        
-        # reset file pointer to beginning (in case validations read it)
+        finally:
+            db.close()
+
+        file_extension = os.path.splitext(file.filename or "")[1]
+        file_id_str = str(row.id)
+        s3_key = f"{file_id_str}{file_extension}"
         file.file.seek(0)
-            
-        # upload the file to S3 with extension
         try:
             self.s3_service.upload_file(
                 file=file.file,
                 key=s3_key,
-                content_type=file.content_type
+                content_type=file.content_type,
             )
         except (S3ServiceException, Exception) as e:
-            logger.error(f"Failed to upload file to S3/MinIO: {str(e)}")
+            logger.error("Failed to upload file to S3/MinIO: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to upload file to storage. Please try again later."
+                detail="Failed to upload file to storage. Please try again later.",
             )
-        
-        # Invalidate file caches
-        cache_service.delete(f"file:{file_id}")
+
+        cache_service.delete(f"file:{file_id_str}")
         cache_service.invalidate_pattern("files:list:*")
-        
-        return response.data[0]
+        return {
+            "id": file_id_str,
+            "name": row.name,
+            "size_bytes": row.size_bytes,
+            "content_type": row.content_type,
+            "uploaded_by": str(row.uploaded_by),
+            "is_deleted": row.is_deleted,
+        }
 
     def update_file_metadata(
         self,
@@ -210,34 +212,43 @@ class FilesService:
                 detail="At least one field (file_name or content_type) must be provided"
             )
         
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        
+        updates["updated_at"] = datetime.now(timezone.utc)
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").update(updates).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="File not found",
+                )
+            if file_name is not None:
+                row.name = file_name
+            if content_type is not None:
+                row.content_type = content_type
+            row.updated_at = updates["updated_at"]
+            db.commit()
+            db.refresh(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update file metadata: {e}"
+                detail=f"Failed to update file metadata: {e!s}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found"
-            )
-        
-        file_data = response.data[0]
-        
-        # Get user profile for response
-        uploaded_by = self._get_user_profile(UUID4(file_data["uploaded_by"]))
-        
+        finally:
+            db.close()
+
+        self._get_user_profile(UUID4(str(row.uploaded_by)))
+
         file_response = FileBaseResponse(
-            id=UUID4(file_data["id"]),
-            name=file_data["name"],
-            size=calculate_file_size(file_data["size_bytes"]),
-            uploaded_by=UUID4(file_data["uploaded_by"]),
-            is_deleted=file_data.get("is_deleted", False),
-            content_type=file_data["content_type"],
+            id=row.id,
+            name=row.name,
+            size=calculate_file_size(row.size_bytes),
+            uploaded_by=row.uploaded_by,
+            is_deleted=row.is_deleted,
+            content_type=row.content_type,
         )
         
         # Invalidate file caches
@@ -247,82 +258,109 @@ class FilesService:
         return file_response
     
     def update_file_project_id(self, file_id: UUID4, project_id: UUID4) -> Dict[str, Any]:
+        fid = PyUUID(str(file_id))
+        pid = PyUUID(str(project_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").update({
-                "project_id": str(project_id),
-            }).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="File not found",
+                )
+            row.project_id = pid
+            db.commit()
+            db.refresh(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update file project id: {e}"
+                detail=f"Failed to update file project id: {e!s}",
             )
-        
-        return response.data[0]
+        finally:
+            db.close()
+        return {
+            "id": str(row.id),
+            "project_id": str(row.project_id) if row.project_id else None,
+        }
 
     def delete_file(self, file_id: UUID4) -> bool:
-        
+        now = datetime.now(timezone.utc)
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            supabase.table("files").update({
-                "is_deleted": True,
-                "deleted_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if row:
+                row.is_deleted = True
+                row.deleted_at = now
+                db.commit()
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete file record from database: {e}"
+                detail=f"Failed to delete file record from database: {e!s}",
             )
-        
-        # Invalidate file caches
+        finally:
+            db.close()
+
         cache_service.delete(f"file:{file_id}")
         cache_service.invalidate_pattern("files:list:*")
-        
         return True
-    
+
     def delete_file_permanently(self, file_id: UUID4) -> bool:
-        
-        # Get file metadata to extract the extension
         file_data = self.get_file(file_id)
         file_extension = os.path.splitext(file_data.name)[1]
         s3_key = f"{str(file_id)}{file_extension}"
-        
-        # delete the file from s3
         try:
             self.s3_service.delete_file(s3_key)
         except (S3ServiceException, Exception) as e:
-            logger.error(f"Failed to delete file from S3/MinIO: {str(e)}")
+            logger.error("Failed to delete file from S3/MinIO: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete file from storage. Please try again later."
+                detail="Failed to delete file from storage. Please try again later.",
             )
-        
-        # delete the file record from the database
+
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            supabase.table("files").delete().eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if row:
+                db.delete(row)
+                db.commit()
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete file record from database: {e}"
+                detail=f"Failed to delete file record from database: {e!s}",
             )
-        
+        finally:
+            db.close()
+
         return True
-    
+
     def restore_file(self, file_id: UUID4) -> bool:
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            file_data =supabase.table("files").update({
-                "is_deleted": False,
-                "deleted_at": None,
-            }).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+            if row:
+                row.is_deleted = False
+                row.deleted_at = None
+                db.commit()
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to restore file record from database: {e}"
+                detail=f"Failed to restore file record from database: {e!s}",
             )
-        
-        # Invalidate file caches
+        finally:
+            db.close()
+
         cache_service.delete(f"file:{file_id}")
         cache_service.invalidate_pattern("files:list:*")
-        
-        return file_data.data[0]
+        return True
 
     def get_files(self, 
             user_id: Optional[UUID4] = None,
@@ -348,78 +386,84 @@ class FilesService:
         if cached:
             return FileGetPaginatedResponseWithUploaders(**cached)
         
-        query = supabase.table("files").select(
-            "id, name, size_bytes, content_type, uploaded_by, org_id, project_id, is_deleted, created_at",
-            count="exact"
-        )
+        conditions = []
         if user_id:
-            query = query.eq("uploaded_by", str(user_id))
+            conditions.append(FileModel.uploaded_by == PyUUID(str(user_id)))
         if org_id:
-            query = query.eq("org_id", str(org_id))
+            conditions.append(FileModel.org_id == PyUUID(str(org_id)))
         if project_id:
-            query = query.eq("project_id", str(project_id))
+            conditions.append(FileModel.project_id == PyUUID(str(project_id)))
         if is_deleted:
-            query = query.eq("is_deleted", is_deleted)
-        
-        # apply the pagination
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+            conditions.append(FileModel.is_deleted.is_(True))
+
+        base = select(FileModel).order_by(FileModel.created_at.desc())
+        if conditions:
+            base = base.where(and_(*conditions))
+
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            count_stmt = select(func.count()).select_from(FileModel)
+            if conditions:
+                count_stmt = count_stmt.where(and_(*conditions))
+            total = int(db.execute(count_stmt).scalar_one())
+            _, off, page_stmt = apply_sa_limit_offset(base, limit, offset)
+            rows = db.execute(page_stmt).scalars().all()
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get files from database: {e}"
+                detail=f"Failed to get files from database: {e!s}",
             )
-        
+        finally:
+            db.close()
+
         files_data = []
         unique_uploader_ids = set()
-        
-        for file in response.data:
-            uploader_id = file['uploaded_by']
-            unique_uploader_ids.add(uploader_id)
-            
-            files_data.append(FileBaseResponse(
-                id=file['id'],
-                name=file['name'],
-                size=calculate_file_size(file['size_bytes']),
-                content_type=file['content_type'],
-                uploaded_by=file['uploaded_by'],
-                is_deleted=file['is_deleted'],
-            ))
-        
-        uploaders_dict = {}
+        for frow in rows:
+            unique_uploader_ids.add(frow.uploaded_by)
+            files_data.append(
+                FileBaseResponse(
+                    id=frow.id,
+                    name=frow.name,
+                    size=calculate_file_size(frow.size_bytes),
+                    content_type=frow.content_type,
+                    uploaded_by=frow.uploaded_by,
+                    is_deleted=frow.is_deleted,
+                )
+            )
+
+        uploaders_dict: Dict[PyUUID, FileUploadedByUserGetResponse] = {}
         if unique_uploader_ids:
+            db = SyncSessionLocal()
             try:
-                profiles_response = supabase.table("profiles").select(
-                    "user_id, display_name, avatar_file_id"
-                ).in_("user_id", list(unique_uploader_ids)).execute()
-                
-                for profile in profiles_response.data:
-                    avatar_url = None
-                    if profile.get('avatar_file_id'):
-                        try:
-                            avatar_url = self.get_file_url(profile['avatar_file_id'])
-                        except:
-                            pass
-                    
-                    uploaders_dict[profile['user_id']] = FileUploadedByUserGetResponse(
-                        id=profile['user_id'],
-                        display_name=profile['display_name'],
-                        avatar_url=avatar_url,
-                    )
+                profs = db.execute(
+                    select(Profile).where(Profile.user_id.in_(list(unique_uploader_ids)))
+                ).scalars().all()
             except Exception as e:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to get uploader profiles: {e}"
+                    detail=f"Failed to get uploader profiles: {e!s}",
                 )
-        
+            finally:
+                db.close()
+            for profile in profs:
+                avatar_url = None
+                if profile.avatar_file_id:
+                    try:
+                        avatar_url = self.get_file_url(profile.avatar_file_id)
+                    except Exception:
+                        pass
+                uploaders_dict[profile.user_id] = FileUploadedByUserGetResponse(
+                    id=profile.user_id,
+                    display_name=profile.display_name or "",
+                    avatar_url=avatar_url,
+                )
+
         result = FileGetPaginatedResponseWithUploaders(
             files=files_data,
             uploaders=uploaders_dict,
-            total=response.count,
+            total=total,
             limit=limit,
-            offset=offset,
+            offset=off,
         )
         
         # Cache the result
@@ -435,29 +479,31 @@ class FilesService:
         if cached:
             return FileBaseResponse(**cached)
         
+        fid = PyUUID(str(file_id))
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").select(
-                "id, name, size_bytes, content_type, uploaded_by, is_deleted"
-            ).eq("id", str(file_id)).execute()
-        except AuthApiError as e:
+            row = db.get(FileModel, fid)
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get file record from database: {e}"
+                detail=f"Failed to get file record from database: {e!s}",
             )
-        
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+
+        if not row:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found"
+                detail="File not found",
             )
-        
+
         file_data = FileBaseResponse(
-            id=response.data[0]['id'],
-            name=response.data[0]['name'],
-            size=calculate_file_size(response.data[0]['size_bytes']),
-            content_type=response.data[0]['content_type'],
-            uploaded_by=response.data[0]['uploaded_by'],
-            is_deleted=response.data[0]['is_deleted'],
+            id=row.id,
+            name=row.name,
+            size=calculate_file_size(row.size_bytes),
+            content_type=row.content_type,
+            uploaded_by=row.uploaded_by,
+            is_deleted=row.is_deleted,
         )
         
         # Cache the result
@@ -513,15 +559,19 @@ class FilesService:
                 detail="Failed to delete files from storage. Please try again later."
             )
         
-        # delete the files from the database
+        db = SyncSessionLocal()
         try:
-            supabase.table("files").delete().eq("org_id", str(org_id)).execute()
-        except AuthApiError as e:
-            raise HTTPException( 
+            db.execute(delete(FileModel).where(FileModel.org_id == PyUUID(str(org_id))))
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete all files from database: {e}"
+                detail=f"Failed to delete all files from database: {e!s}",
             )
-        
+        finally:
+            db.close()
+
         return True
     
     def delete_permanently_all_files_by_project_id(self, project_id: UUID4) -> bool:
@@ -529,14 +579,19 @@ class FilesService:
         Delete all file records associated with a project from the database.
         Note: This does NOT delete files from S3/MinIO storage.
         """
+        db = SyncSessionLocal()
         try:
-            supabase.table("files").delete().eq("project_id", str(project_id)).execute()
+            db.execute(delete(FileModel).where(FileModel.project_id == PyUUID(str(project_id))))
+            db.commit()
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete all files from database: {e}"
+                detail=f"Failed to delete all files from database: {e!s}",
             )
-        
+        finally:
+            db.close()
+
         return True
 
     def validate_file_extension(self, filename: str) -> bool:
@@ -572,58 +627,61 @@ class FilesService:
                 avatar_url=avatar_url,
             )
         
-        # Fetch from database if not cached
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("profiles").select("user_id, display_name, email, avatar_file_id").eq("user_id", str(user_id)).execute()
+            profile = db.execute(
+                select(Profile).where(Profile.user_id == PyUUID(str(user_id)))
+            ).scalar_one_or_none()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get user profile: {e}"
+                detail=f"Failed to get user profile: {e!s}",
             )
-        
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+
+        if not profile:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="User profile not found"
+                detail="User profile not found",
             )
-        
-        profile = response.data[0]
         avatar_url = None
-        if profile.get('avatar_file_id'):
+        if profile.avatar_file_id:
             try:
-                avatar_url = self.get_file_url(UUID4(profile['avatar_file_id']))
+                avatar_url = self.get_file_url(profile.avatar_file_id)
             except HTTPException:
                 pass
-        
-        # Cache the user data (include email for consistency)
+
         user_data_for_cache = {
-            'id': profile['user_id'],
-            'display_name': profile['display_name'],
-            'email': profile.get('email'),
-            'avatar_file_id': profile.get('avatar_file_id'),
+            "id": str(profile.user_id),
+            "display_name": profile.display_name,
+            "email": profile.email,
+            "avatar_file_id": str(profile.avatar_file_id) if profile.avatar_file_id else None,
         }
         UserCache.set_user(str(user_id), user_data_for_cache)
-        
+
         return FileUploadedByUserGetResponse(
-            id=UUID4(profile['user_id']),
-            display_name=profile['display_name'],
+            id=profile.user_id,
+            display_name=profile.display_name or "",
             avatar_url=avatar_url,
         )
     
     def check_uploaded_by_user(self, file_id: UUID4, user_id: UUID4) -> bool:
+        db = SyncSessionLocal()
         try:
-            response = supabase.table("files").select("uploaded_by").eq("id", str(file_id)).execute()
+            uid = db.execute(
+                select(FileModel.uploaded_by).where(FileModel.id == PyUUID(str(file_id)))
+            ).scalar_one_or_none()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to check file ownership: {e}"
+                detail=f"Failed to check file ownership: {e!s}",
             )
-        
-        # If file doesn't exist, return False
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+        if not uid:
             return False
-        
-        return response.data[0]['uploaded_by'] == str(user_id)
+        return uid == PyUUID(str(user_id))
     
     def upload_chat_attachment(
         self,
@@ -651,9 +709,6 @@ class FilesService:
             Dict with attachment metadata
         """
         try:
-            import uuid
-            from datetime import datetime, timezone
-            
             attachment_id = uuid.uuid4()
             file_size = len(file_content)
             
@@ -694,26 +749,30 @@ class FilesService:
                     logger.warning(f"Failed to generate thumbnail: {str(e)}")
                     pass
             
-            insert_data = {
-                'id': str(attachment_id),
-                'message_id': None,
-                'message_type': chat_type,
-                'file_name': file_name,
-                'file_size': file_size,
-                'file_type': content_type,
-                'storage_path': s3_key,
-                'thumbnail_path': thumbnail_path,
-                'uploaded_by': str(user_id),
-                'created_at': datetime.now(timezone.utc).isoformat()
-            }
-            
-            response = supabase.table('chat_attachments').insert(insert_data).execute()
-            
-            if not response.data:
+            ca = ChatAttachment(
+                id=attachment_id,
+                message_id=None,
+                message_type=chat_type,
+                file_name=file_name,
+                file_size=file_size,
+                file_type=content_type,
+                storage_path=s3_key,
+                thumbnail_path=thumbnail_path,
+                uploaded_by=PyUUID(str(user_id)),
+                created_at=datetime.now(timezone.utc),
+            )
+            db = SyncSessionLocal()
+            try:
+                db.add(ca)
+                db.commit()
+            except Exception as e:
+                db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to create attachment record"
+                    detail=f"Failed to create attachment record: {e!s}",
                 )
+            finally:
+                db.close()
             
             return {
                 'attachment_id': attachment_id,
@@ -747,48 +806,46 @@ class FilesService:
             Dict with attachment details (attachment_id, file_name, file_size, file_type, thumbnail_url)
         """
         try:
-            attachment_response = supabase.table('chat_attachments').select('*').eq(
-                'id', str(attachment_id)
-            ).execute()
-            
-            if not attachment_response.data:
+            db = SyncSessionLocal()
+            try:
+                attachment = db.execute(
+                    select(ChatAttachment).where(ChatAttachment.id == PyUUID(str(attachment_id)))
+                ).scalar_one_or_none()
+            finally:
+                db.close()
+
+            if not attachment:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Attachment not found"
+                    detail="Attachment not found",
                 )
-            
-            attachment = attachment_response.data[0]
-            
-            # Verify user has access to the attachment
-            # If attachment is not yet linked to a message, check if user is the uploader
-            if not attachment.get('message_id'):
-                if attachment.get('uploaded_by') != str(user_id):
+
+            if not attachment.message_id:
+                if str(attachment.uploaded_by) != str(user_id):
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied to this attachment"
+                        detail="Access denied to this attachment",
                     )
             else:
-                # If linked to a message, verify access through message
                 self._verify_attachment_access(attachment, user_id)
             
             # Generate thumbnail URL if thumbnail exists
             thumbnail_url = None
-            if attachment.get('thumbnail_path'):
+            if attachment.thumbnail_path:
                 try:
                     thumbnail_url = self.s3_service.generate_presigned_url(
-                        attachment['thumbnail_path'],
-                        expiration=3600  # 1 hour
+                        attachment.thumbnail_path,
+                        expiration=3600,
                     )
                 except (S3ServiceException, Exception) as e:
-                    logger.warning(f"Failed to generate thumbnail URL: {str(e)}")
-                    pass
-            
+                    logger.warning("Failed to generate thumbnail URL: %s", e)
+
             return {
-                'attachment_id': attachment_id,
-                'file_name': attachment['file_name'],
-                'file_size': calculate_file_size(attachment['file_size']),
-                'file_type': attachment['file_type'],
-                'thumbnail_url': thumbnail_url
+                "attachment_id": attachment_id,
+                "file_name": attachment.file_name,
+                "file_size": calculate_file_size(attachment.file_size),
+                "file_type": attachment.file_type,
+                "thumbnail_url": thumbnail_url,
             }
             
         except HTTPException:
@@ -816,37 +873,37 @@ class FilesService:
             Dict with download URL and expiration
         """
         try:
-            from datetime import datetime, timezone, timedelta
-            
-            attachment_response = supabase.table('chat_attachments').select('*').eq(
-                'id', str(attachment_id)
-            ).execute()
-            
-            if not attachment_response.data:
+            db = SyncSessionLocal()
+            try:
+                att = db.execute(
+                    select(ChatAttachment).where(ChatAttachment.id == PyUUID(str(attachment_id)))
+                ).scalar_one_or_none()
+            finally:
+                db.close()
+
+            if not att:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Attachment not found"
+                    detail="Attachment not found",
                 )
-            
-            attachment = attachment_response.data[0]
-            
-            self._verify_attachment_access(attachment, user_id)
-            
+
+            self._verify_attachment_access(att, user_id)
+
             try:
                 download_url = self.s3_service.generate_presigned_url(
-                    attachment['storage_path'],
-                    expiration=900
+                    att.storage_path,
+                    expiration=900,
                 )
             except (S3ServiceException, Exception) as e:
-                logger.error(f"Failed to generate presigned URL from S3/MinIO: {str(e)}")
+                logger.error("Failed to generate presigned URL from S3/MinIO: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to generate download URL. Please try again later."
+                    detail="Failed to generate download URL. Please try again later.",
                 )
-            
+
             return {
-                'download_url': download_url,
-                'expires_at': datetime.now(timezone.utc) + timedelta(minutes=15)
+                "download_url": download_url,
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
             }
             
         except HTTPException:
@@ -870,39 +927,40 @@ class FilesService:
             bool: True if successful
         """
         try:
-            attachment_response = supabase.table('chat_attachments').select('*').eq(
-                'id', str(attachment_id)
-            ).execute()
-            
-            if not attachment_response.data:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Attachment not found"
-                )
-            
-            attachment = attachment_response.data[0]
-            
-            if attachment['uploaded_by'] != str(user_id):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You can only delete your own attachments"
-                )
-            
+            db = SyncSessionLocal()
             try:
-                self.s3_service.delete_file(attachment['storage_path'])
-            except (S3ServiceException, Exception) as e:
-                logger.warning(f"Failed to delete attachment file from S3/MinIO: {str(e)}")
-                pass
-            
-            if attachment.get('thumbnail_path'):
+                attachment = db.execute(
+                    select(ChatAttachment).where(ChatAttachment.id == PyUUID(str(attachment_id)))
+                ).scalar_one_or_none()
+                if not attachment:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Attachment not found",
+                    )
+                if str(attachment.uploaded_by) != str(user_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You can only delete your own attachments",
+                    )
                 try:
-                    self.s3_service.delete_file(attachment['thumbnail_path'])
+                    self.s3_service.delete_file(attachment.storage_path)
                 except (S3ServiceException, Exception) as e:
-                    logger.warning(f"Failed to delete thumbnail from S3/MinIO: {str(e)}")
-                    pass
-            
-            supabase.table('chat_attachments').delete().eq('id', str(attachment_id)).execute()
-            
+                    logger.warning("Failed to delete attachment file from S3/MinIO: %s", e)
+                if attachment.thumbnail_path:
+                    try:
+                        self.s3_service.delete_file(attachment.thumbnail_path)
+                    except (S3ServiceException, Exception) as e:
+                        logger.warning("Failed to delete thumbnail from S3/MinIO: %s", e)
+                db.delete(attachment)
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
             return True
             
         except HTTPException:
@@ -962,78 +1020,65 @@ class FilesService:
                 logger.warning(f"Failed to upload thumbnail to S3/MinIO: {str(e)}")
                 return None
             
-            print(thumb_key)
-            
             return thumb_key
-            
-        except Exception as e:
-            print(e)
+
+        except Exception:
             return None
-    
-    def _verify_attachment_access(self, attachment: Dict[str, Any], user_id: UUID4) -> None:
-        """
-        Verify user has access to the attachment's parent message
-        
-        Args:
-            attachment: The attachment record
-            user_id: The user ID
-            
-        Raises:
-            HTTPException: If access denied
-        """
-        if not attachment.get('message_id'):
+
+    def _verify_attachment_access(self, attachment: ChatAttachment, user_id: UUID4) -> None:
+        if not attachment.message_id:
             return
-        
-        message_type = attachment['message_type']
-        message_id = attachment['message_id']
-        
+
+        message_type = attachment.message_type
+        mid = attachment.message_id
+        uid = PyUUID(str(user_id))
+
         try:
-            if message_type == 'project':
-                message_response = supabase.table('chat_messages').select(
-                    'project_id'
-                ).eq('id', message_id).execute()
-                
-                if not message_response.data:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Message not found"
+            db = SyncSessionLocal()
+            try:
+                if message_type == "project":
+                    pid = db.execute(
+                        select(ChatMessage.project_id).where(ChatMessage.id == mid)
+                    ).scalar_one_or_none()
+                    if not pid:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    ok = (
+                        db.execute(
+                            select(ProjectMember.id).where(
+                                ProjectMember.project_id == pid,
+                                ProjectMember.user_id == uid,
+                            ).limit(1)
+                        ).first()
+                        is not None
                     )
-                
-                project_id = message_response.data[0]['project_id']
-                
-                member_response = supabase.table('project_members').select('id').eq(
-                    'project_id', project_id
-                ).eq('user_id', str(user_id)).execute()
-                
-                if not member_response.data:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied to this attachment"
-                    )
-            
-            else:
-                dm_response = supabase.table('direct_messages').select(
-                    'sender_id, receiver_id'
-                ).eq('id', message_id).execute()
-                
-                if not dm_response.data:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Message not found"
-                    )
-                
-                dm = dm_response.data[0]
-                
-                if dm['sender_id'] != str(user_id) and dm['receiver_id'] != str(user_id):
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied to this attachment"
-                    )
-        
+                    if not ok:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Access denied to this attachment",
+                        )
+                else:
+                    dm = db.execute(
+                        select(DirectMessage).where(DirectMessage.id == mid)
+                    ).scalar_one_or_none()
+                    if not dm:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Message not found",
+                        )
+                    if dm.sender_id != uid and dm.receiver_id != uid:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Access denied to this attachment",
+                        )
+            finally:
+                db.close()
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to verify attachment access: {str(e)}"
+                detail=f"Failed to verify attachment access: {e!s}",
             )

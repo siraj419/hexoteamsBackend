@@ -2,8 +2,6 @@ from typing import Dict, Any, Optional
 from pydantic import UUID4
 import logging
 
-from app.core import supabase
-
 logger = logging.getLogger(__name__)
 
 

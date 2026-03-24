@@ -1,15 +1,19 @@
 import re
 import logging
 from uuid import UUID
+
 from fastapi import HTTPException, status, UploadFile
 from pydantic import UUID4
-from supabase_auth.errors import AuthApiError
-from typing import Optional, List, Callable, Dict
-from datetime import datetime, timezone
+from sqlalchemy import and_, delete, desc, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from typing import Optional, List, Callable, Dict, Any, Tuple
+from datetime import datetime, timezone, date
 
 logger = logging.getLogger(__name__)
 
-from app.core import supabase
+from app.db.sync_session import SyncSessionLocal
+from app.models import Attachment, File, Profile, Project, Task, TaskComment
 from app.schemas.tasks import (
     TaskCreateRequest,
     TaskCreateResponse,
@@ -43,9 +47,9 @@ from app.services.files import FilesService
 from app.services.attachment import AttachmentService
 from app.services.activity import ActivityService, ActivityType
 from app.services.link import LinkService, LinkEntityType
-from app.utils import calculate_time_ago, apply_pagination, calculate_file_size
+from app.utils import calculate_time_ago, calculate_file_size
+from app.utils.pagination import apply_sa_limit_offset
 from app.utils.redis_cache import ProjectSummaryCache, cache_service
-import json
 from app.utils.inbox_helpers import (
     trigger_task_assigned_notification,
     trigger_task_unassigned_notification,
@@ -79,78 +83,70 @@ class TaskService:
                     detail=f"Subtask depth exceed the maximum allowed depth",
                 )
         
+        now = datetime.now(timezone.utc)
+        due = task_request.due_date
+        if due is not None and isinstance(due, date) and not isinstance(due, datetime):
+            due = datetime.combine(due, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+        db = SyncSessionLocal()
         try:
-            insert_data = {
-                'title': task_request.title,
-                'content': task_request.content,
-                'status': task_request.status.value,
-                'parent_id': str(parent_id) if parent_id else None,
-                'project_id': str(project_id),
-                'created_by': str(user_id),
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }
-            
-            if task_request.due_date:
-                if isinstance(task_request.due_date, datetime):
-                    insert_data['due_date'] = task_request.due_date.isoformat()
-                else:
-                    insert_data['due_date'] = task_request.due_date
-            
-            if task_request.assignee_id:
-                insert_data['assignee_id'] = str(task_request.assignee_id)
-            
-            response = supabase.table('tasks').insert(insert_data).execute()
-        except AuthApiError as e:
+            row = Task(
+                title=task_request.title,
+                content=task_request.content,
+                status=task_request.status.value,
+                parent_id=UUID(str(parent_id)) if parent_id else None,
+                project_id=UUID(str(project_id)),
+                created_by=UUID(str(user_id)),
+                created_at=now,
+                updated_at=now,
+                due_date=due,
+                assignee_id=UUID(str(task_request.assignee_id)) if task_request.assignee_id else None,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create task: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create task"
-            )
-            
-        # add the task attachments
-        if task_request.file_ids and len(task_request.file_ids) > 0:
+        finally:
+            db.close()
+
+        if task_request.file_ids:
             for file_id in task_request.file_ids:
-                self.attachment_service.add_attachment(AttachmentType.TASk, response.data[0]['id'], file_id)
-        
-        # Record activity: task created
+                self.attachment_service.add_attachment(AttachmentType.TASk, row.id, file_id)
+
         try:
             user_info = self._get_user_info(user_id)
             self.activity_service.add_activity(
                 ActivityType.TASK,
-                response.data[0]['id'],
+                row.id,
                 user_id,
                 f"Task created by {user_info.display_name}"
             )
         except Exception as e:
-            # Don't fail task creation if activity recording fails, but log the error
             logger.error(f"Failed to record task creation activity: {str(e)}", exc_info=True)
-        
-        # Invalidate project summary cache and update project progress
+
         ProjectSummaryCache.delete_summary(str(project_id))
-        
-        # Update project progress when task is created
+
         try:
             from app.services.project import ProjectService
             project_service = ProjectService()
             project_service.update_project_progress(project_id)
         except Exception as e:
             logger.error(f"Failed to update project progress: {e}", exc_info=True)
-            
+
         return TaskCreateResponse(
-            id=response.data[0]['id'],
-            parent_id=response.data[0]['parent_id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
-            assignee_id=response.data[0]['assignee_id'],
-            project_id=response.data[0]['project_id'],
+            id=row.id,
+            parent_id=row.parent_id,
+            title=row.title,
+            content=row.content,
+            status=TaskStatus(row.status),
+            due_date=row.due_date,
+            assignee_id=row.assignee_id,
+            project_id=row.project_id,
         )
 
     
@@ -170,42 +166,54 @@ class TaskService:
                     detail=f"Comment depth exceed the maximum allowed depth",
                 )
         
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('task_comments').insert({
-                'task_id': str(task_id),
-                'content': task_comment_request.content,
-                'parent_id': str(parent_id) if parent_id else None,
-                'created_by': str(user_id),
-                'created_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).execute()
-        except Exception as e:
-            if e.code == '23505':
+            row = TaskComment(
+                task_id=UUID(str(task_id)),
+                content=task_comment_request.content,
+                parent_id=UUID(str(parent_id)) if parent_id else None,
+                created_by=UUID(str(user_id)),
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        except IntegrityError as e:
+            db.rollback()
+            if getattr(e.orig, "pgcode", None) == "23505":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Failed to add task comment for task {task_id}, task or user not found",
                 )
-            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to add task comment: {e}"
             )
-        
-        # add the task comment attachments
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to add task comment: {e}"
+            )
+        finally:
+            db.close()
+
         attachments = []
-        if task_comment_request.file_ids and len(task_comment_request.file_ids) > 0:
+        if task_comment_request.file_ids:
             for file_id in task_comment_request.file_ids:
-                attachment = self.attachment_service.add_attachment(AttachmentType.COMMENT, response.data[0]['id'], file_id)
+                attachment = self.attachment_service.add_attachment(AttachmentType.COMMENT, row.id, file_id)
                 attachments.append(attachment)
-        
+
         user_timezone = self._get_user_timezone(user_id)
         user_info = self._get_user_info(user_id)
-        
+
         return TaskCommentCreateResponse(
-            id=response.data[0]['id'],
-            content=response.data[0]['content'],
+            id=row.id,
+            content=row.content,
             comment_by=user_info,
-            message_time=calculate_time_ago(response.data[0]['created_at'], user_timezone),
+            message_time=calculate_time_ago(row.created_at, user_timezone),
             attachments=attachments,
         )
     
@@ -215,22 +223,35 @@ class TaskService:
         comment_update_request: TaskCommentUpdateRequest,
         user_id: UUID4,
     ) -> TaskCommentUpdateResponse:
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('task_comments').update({
-                'content': comment_update_request.content,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', str(comment_id)).eq('created_by', str(user_id)).execute()
+            r = db.execute(
+                update(TaskComment)
+                .where(
+                    TaskComment.id == UUID(str(comment_id)),
+                    TaskComment.created_by == UUID(str(user_id)),
+                )
+                .values(content=comment_update_request.content, updated_at=now)
+            )
+            db.commit()
+            if r.rowcount == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comment not found or you don't have permission to update it"
+                )
+            row = db.get(TaskComment, UUID(str(comment_id)))
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update task comment: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Comment not found or you don't have permission to update it"
-            )
+        finally:
+            db.close()
         
         # Add new attachments if provided
         attachments = []
@@ -247,10 +268,10 @@ class TaskService:
         user_info = self._get_user_info(user_id)
         
         return TaskCommentUpdateResponse(
-            id=response.data[0]['id'],
-            content=response.data[0]['content'],
+            id=row.id,
+            content=row.content,
             comment_by=user_info,
-            message_time=calculate_time_ago(response.data[0]['updated_at'], user_timezone),
+            message_time=calculate_time_ago(row.updated_at, user_timezone),
             attachments=attachments,
         )
     
@@ -259,38 +280,44 @@ class TaskService:
         comment_id: UUID4,
         user_id: UUID4,
     ) -> bool:
-        # Check if comment exists and belongs to user
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('task_comments').select('id').eq('id', str(comment_id)).eq('created_by', str(user_id)).execute()
+            row = db.execute(
+                select(TaskComment.id).where(
+                    TaskComment.id == UUID(str(comment_id)),
+                    TaskComment.created_by == UUID(str(user_id)),
+                )
+            ).scalar_one_or_none()
         except Exception as e:
+            db.close()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get task comment: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
+
+        if row is None:
+            db.close()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Comment not found or you don't have permission to delete it"
             )
-        
-        # Delete all associated attachments for this comment
+
         try:
             self.attachment_service.delete_all(comment_id, AttachmentType.COMMENT)
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"Failed to delete attachments for comment {comment_id}: {e}")
-            # Continue with comment deletion even if attachment deletion fails
-        
-        # Delete the comment
+
         try:
-            supabase.table('task_comments').delete().eq('id', str(comment_id)).execute()
+            db.execute(delete(TaskComment).where(TaskComment.id == UUID(str(comment_id))))
+            db.commit()
         except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete task comment: {e}"
             )
+        finally:
+            db.close()
         
         return True
     
@@ -305,15 +332,18 @@ class TaskService:
         subtasks_limit: Optional[int] = 5,
         subtasks_offset: Optional[int] = 0,
     ) -> TaskGetResponse:
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('tasks').select('*').eq('id', task_id).execute()
-        except AuthApiError as e:
+            t = db.get(Task, UUID(str(task_id)))
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get task: {e}"
             )
+        finally:
+            db.close()
 
-        if not response.data or len(response.data) == 0:
+        if t is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Task not found"
@@ -329,20 +359,20 @@ class TaskService:
         task_links_response = link_service.get_links(
             task_id, LinkEntityType.TASK, limit=links_limit, offset=links_offset
         )
-        assignee = self._get_user_info(response.data[0]['assignee_id']) if response.data[0]['assignee_id'] else None
+        assignee = self._get_user_info(t.assignee_id) if t.assignee_id else None
 
         subtasks_response = self.list_subtasks(
             task_id, user_id=user_id, limit=subtasks_limit, offset=subtasks_offset
         )
 
         return TaskGetResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
+            id=t.id,
+            title=t.title,
+            content=t.content,
+            status=TaskStatus(t.status),
+            due_date=t.due_date,
             assignee=assignee,
-            project_id=response.data[0]['project_id'],
+            project_id=t.project_id,
             comments=task_comments,
             attachments_paginated=PaginatedAttachments(
                 attachments=task_attachments_response.attachments,
@@ -376,36 +406,42 @@ class TaskService:
         offset: Optional[int] = None,
     ) -> List[TaskResponse]:
         
-        
-        query = supabase.table('tasks').select('*').eq('project_id', str(project_id)).is_('parent_id', 'null')
-        
+        stmt = select(Task).where(
+            Task.project_id == UUID(str(project_id)),
+            Task.parent_id.is_(None),
+        )
         if user_id:
-            query = query.eq('created_by', str(user_id))
+            stmt = stmt.where(Task.created_by == UUID(str(user_id)))
         if assignee_id:
-            query = query.eq('assignee_id', str(assignee_id))
+            stmt = stmt.where(Task.assignee_id == UUID(str(assignee_id)))
         if status:
-            query = query.eq('status', status.value)
+            stmt = stmt.where(Task.status == status.value)
         if search:
-            query = query.ilike('title', f'%{search}%')
-        
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+            stmt = stmt.where(Task.title.ilike(f"%{search}%"))
+
+        lim, off, stmt = apply_sa_limit_offset(stmt, limit, offset)
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
+            rows = list(db.scalars(stmt).all())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get tasks: {e}"
             )
-        
-        return [TaskResponse(
-            id=task['id'],
-            title=task['title'],
-            content=task['content'],
-            status=task['status'],
-            due_date=task['due_date'],
-            assignee=self._get_user_info(task['assignee_id']) if task['assignee_id'] else None,
-        ) for task in response.data]
+        finally:
+            db.close()
+
+        return [
+            TaskResponse(
+                id=r.id,
+                title=r.title,
+                content=r.content,
+                status=TaskStatus(r.status),
+                due_date=r.due_date,
+                assignee=self._get_user_info(r.assignee_id) if r.assignee_id else None,
+            )
+            for r in rows
+        ]
     
     def get_project_tasks_minimal(
         self,
@@ -417,21 +453,25 @@ class TaskService:
         """
         from app.schemas.tasks import TaskMinimalResponse
         
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('tasks').select('id, title').eq('project_id', str(project_id)).order('created_at', desc=False).execute()
+            rows = db.execute(
+                select(Task.id, Task.title)
+                .where(Task.project_id == UUID(str(project_id)))
+                .order_by(Task.created_at.asc())
+            ).all()
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get project tasks: {e}"
             )
-        
-        if not response.data:
+        finally:
+            db.close()
+
+        if not rows:
             return []
-        
-        return [TaskMinimalResponse(
-            id=task['id'],
-            title=task['title'],
-        ) for task in response.data]
+
+        return [TaskMinimalResponse(id=r[0], title=r[1]) for r in rows]
     
     def change_task_assignee(
         self,
@@ -448,59 +488,53 @@ class TaskService:
         Task can only have exactly one assignee (or none).
         Records activity when assignee changes.
         """
-        # Get current task data to compare
+        now = datetime.now(timezone.utc)
+        tid = UUID(str(task_id))
+        db = SyncSessionLocal()
         try:
-            current_task = supabase.table('tasks').select('assignee_id').eq('id', str(task_id)).execute()
-            if not current_task.data or len(current_task.data) == 0:
+            cur = db.get(Task, tid)
+            if not cur:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Task not found"
                 )
-            old_assignee_id = current_task.data[0].get('assignee_id')
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task: {e}"
-            )
-        
-        try:
-            update_data = {
-                'assignee_id': str(assignee_request.assignee_id) if assignee_request.assignee_id else None,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }
-            
-            response = supabase.table('tasks').update(update_data).eq('id', str(task_id)).execute()
-        except AuthApiError as e:
+            old_assignee_id = cur.assignee_id
+            cur.assignee_id = UUID(str(assignee_request.assignee_id)) if assignee_request.assignee_id else None
+            cur.updated_at = now
+            db.commit()
+            db.refresh(cur)
+            task_row = cur
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to change task assignee: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task not found"
-            )
-        
-        # Record activity: assignee changed
+        finally:
+            db.close()
+
         try:
             actor_info = self._get_user_info(user_id)
-            new_assignee_id = response.data[0].get('assignee_id')
-            task_data = response.data[0]
-            
-            task_title = task_data.get('title', 'Untitled Task')
-            project_id = task_data.get('project_id')
-            
+            new_assignee_id = task_row.assignee_id
+            task_title = task_row.title or "Untitled Task"
+            proj_id = task_row.project_id
+
             project_name = "Unknown Project"
             org_id = None
-            if project_id:
+            if proj_id:
+                pdb = SyncSessionLocal()
                 try:
-                    project_response = supabase.table('projects').select('name, org_id').eq('id', str(project_id)).execute()
-                    if project_response.data:
-                        project_name = project_response.data[0].get('name', 'Unknown Project')
-                        org_id = project_response.data[0].get('org_id')
+                    p = pdb.get(Project, proj_id)
+                    if p:
+                        project_name = p.name or "Unknown Project"
+                        org_id = p.org_id
                 except Exception:
                     pass
+                finally:
+                    pdb.close()
             
             if not old_assignee_id and new_assignee_id:
                 # Task assigned
@@ -572,24 +606,21 @@ class TaskService:
                     description
                 )
         except Exception as e:
-            # Don't fail assignee change if activity recording fails, but log the error
             logger.error(f"Failed to record assignee change activity: {str(e)}", exc_info=True)
-        
-        # Invalidate project summary cache (affects team workload)
-        project_id = response.data[0].get('project_id')
-        if project_id:
-            ProjectSummaryCache.delete_summary(str(project_id))
-        
+
+        if task_row.project_id:
+            ProjectSummaryCache.delete_summary(str(task_row.project_id))
+
         assignee = None
-        if response.data[0].get('assignee_id'):
-            assignee = self._get_user_info(response.data[0]['assignee_id'])
-        
+        if task_row.assignee_id:
+            assignee = self._get_user_info(task_row.assignee_id)
+
         return TaskResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
+            id=task_row.id,
+            title=task_row.title,
+            content=task_row.content,
+            status=TaskStatus(task_row.status),
+            due_date=task_row.due_date,
             assignee=assignee,
         )
     
@@ -602,25 +633,27 @@ class TaskService:
         Returns None if task has no assignee.
         Optimized single query operation.
         """
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('tasks').select('assignee_id').eq('id', str(task_id)).execute()
-        except AuthApiError as e:
+            t = db.get(Task, UUID(str(task_id)))
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get task assignee: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
+        finally:
+            db.close()
+
+        if t is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Task not found"
             )
-        
-        assignee_id = response.data[0].get('assignee_id')
-        if not assignee_id:
+
+        if not t.assignee_id:
             return None
-        
-        return self._get_user_info(assignee_id)
+
+        return self._get_user_info(t.assignee_id)
     
     def update_task(
         self,
@@ -628,43 +661,44 @@ class TaskService:
         task_request: TaskUpdateRequest,
         user_id: UUID4,
     ) -> TaskUpdateResponse:
-        # Get current task data to compare status
+        tid = UUID(str(task_id))
+        uid = UUID(str(user_id))
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            current_task = supabase.table('tasks').select('status').eq('id', str(task_id)).execute()
-            if not current_task.data or len(current_task.data) == 0:
+            cur = db.get(Task, tid)
+            if not cur or cur.created_by != uid:
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Task not found"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Failed to update task"
                 )
-            old_status = current_task.data[0].get('status')
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task: {e}"
-            )
-        
-        try:
-            response = supabase.table('tasks').update({
-                'title': task_request.title,
-                'content': task_request.content,
-                'status': task_request.status.value if task_request.status else None,
-                'due_date': task_request.due_date,
-                'assignee_id': task_request.assignee_id,
-                'updated_at': datetime.now(timezone.utc),
-            }).eq('id', task_id).eq('created_by', user_id).execute()
-        except AuthApiError as e:
+            old_status = cur.status
+            if task_request.title is not None:
+                cur.title = task_request.title
+            if task_request.content is not None:
+                cur.content = task_request.content
+            if task_request.status is not None:
+                cur.status = task_request.status.value
+            if task_request.due_date is not None:
+                cur.due_date = task_request.due_date
+            if task_request.assignee_id is not None:
+                cur.assignee_id = task_request.assignee_id
+            cur.updated_at = now
+            db.commit()
+            db.refresh(cur)
+            updated = cur
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update task: {e}"
             )
+        finally:
+            db.close()
         
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to update task"
-            )
-        
-        # Record activity: status changed
         status_changed = False
         if task_request.status and old_status != task_request.status.value:
             status_changed = True
@@ -677,31 +711,28 @@ class TaskService:
                     f"Task status changed from {self._format_status(old_status)} to {self._format_status(task_request.status.value)} by {actor_info.display_name}"
                 )
             except Exception as e:
-                # Don't fail task update if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
-        
-        # Invalidate project summary cache and update project progress
-        project_id = response.data[0].get('project_id')
-        if project_id:
-            ProjectSummaryCache.delete_summary(str(project_id))
-            
-            # Update project progress on any status change
+
+        pid = updated.project_id
+        if pid:
+            ProjectSummaryCache.delete_summary(str(pid))
+
             if status_changed and task_request.status:
                 try:
                     from app.services.project import ProjectService
                     project_service = ProjectService()
-                    project_service.update_project_progress(UUID4(project_id))
+                    project_service.update_project_progress(UUID4(pid))
                 except Exception as e:
                     logger.error(f"Failed to update project progress: {e}", exc_info=True)
-        
+
         return TaskUpdateResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
-            assignee_id=response.data[0]['assignee_id'],
-            project_id=response.data[0]['project_id'],
+            id=updated.id,
+            title=updated.title,
+            content=updated.content,
+            status=TaskStatus(updated.status),
+            due_date=updated.due_date,
+            assignee_id=updated.assignee_id,
+            project_id=updated.project_id,
         )
     
     def change_task_status(
@@ -715,41 +746,35 @@ class TaskService:
         Records activity when status changes.
         Optimized single query operation.
         """
-        # Get current task data to compare
+        tid = UUID(str(task_id))
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            current_task = supabase.table('tasks').select('status').eq('id', str(task_id)).execute()
-            if not current_task.data or len(current_task.data) == 0:
+            cur = db.get(Task, tid)
+            if not cur:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Task not found"
                 )
-            old_status = current_task.data[0].get('status')
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get task: {e}"
-            )
-        
-        try:
-            response = supabase.table('tasks').update({
-                'status': status_request.status.value,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', str(task_id)).execute()
-        except AuthApiError as e:
+            old_status = cur.status
+            cur.status = status_request.status.value
+            cur.updated_at = now
+            db.commit()
+            db.refresh(cur)
+            task_row = cur
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to change task status: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task not found"
-            )
-        
-        # Record activity: status changed
+        finally:
+            db.close()
+
         if old_status != status_request.status.value:
-            print("Changing status....")
             try:
                 actor_info = self._get_user_info(user_id)
                 self.activity_service.add_activity(
@@ -759,27 +784,24 @@ class TaskService:
                     f"Task status changed from {self._format_status(old_status)} to {self._format_status(status_request.status.value)} by {actor_info.display_name}"
                 )
 
-                
-                if status_request.status.value == 'completed':
-                    print("Task completed....")
-                    task_data = response.data[0]
-                    task_title = task_data.get('title', 'Untitled Task')
-                    project_id = task_data.get('project_id')
-                    
+                if status_request.status.value == "completed":
+                    task_title = task_row.title or "Untitled Task"
+                    project_id = task_row.project_id
                     project_name = "Unknown Project"
                     org_id = None
                     if project_id:
+                        pdb = SyncSessionLocal()
                         try:
-                            project_response = supabase.table('projects').select('name, org_id').eq('id', str(project_id)).execute()
-                            if project_response.data:
-                                project_name = project_response.data[0].get('name', 'Unknown Project')
-                                org_id = project_response.data[0].get('org_id')
-                            print(project_response)
-                        except Exception as e:
-                            print(f"Failed to get project: {e}")
-                    
+                            p = pdb.get(Project, project_id)
+                            if p:
+                                project_name = p.name or "Unknown Project"
+                                org_id = p.org_id
+                        except Exception:
+                            pass
+                        finally:
+                            pdb.close()
+
                     if org_id and project_id:
-                        print("Triggering task completed notification....")
                         trigger_task_completed_notification(
                             project_id=UUID4(project_id),
                             org_id=UUID4(org_id),
@@ -790,33 +812,29 @@ class TaskService:
                             project_name=project_name,
                         )
             except Exception as e:
-                # Don't fail status change if activity recording fails, but log the error
                 logger.error(f"Failed to record status change activity: {str(e)}", exc_info=True)
-        
-        # Invalidate project summary cache and update project progress
-        project_id = response.data[0].get('project_id')
-        if project_id:
-            ProjectSummaryCache.delete_summary(str(project_id))
-            
-            # Update project progress on any status change
+
+        if task_row.project_id:
+            ProjectSummaryCache.delete_summary(str(task_row.project_id))
+
             if old_status != status_request.status.value:
                 try:
                     from app.services.project import ProjectService
                     project_service = ProjectService()
-                    project_service.update_project_progress(UUID4(project_id))
+                    project_service.update_project_progress(UUID4(task_row.project_id))
                 except Exception as e:
                     logger.error(f"Failed to update project progress: {e}", exc_info=True)
-        
+
         assignee = None
-        if response.data[0].get('assignee_id'):
-            assignee = self._get_user_info(response.data[0]['assignee_id'])
-        
+        if task_row.assignee_id:
+            assignee = self._get_user_info(task_row.assignee_id)
+
         return TaskResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
+            id=task_row.id,
+            title=task_row.title,
+            content=task_row.content,
+            status=TaskStatus(task_row.status),
+            due_date=task_row.due_date,
             assignee=assignee,
         )
     
@@ -835,47 +853,55 @@ class TaskService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="At least one of title, content, or due_date must be provided"
             )
-        
-        update_data = {
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-        }
-        
-        if details_request.title is not None:
-            update_data['title'] = details_request.title
-        if details_request.content is not None:
-            update_data['content'] = details_request.content
-        if details_request.due_date is not None:
-            update_data['due_date'] = details_request.due_date.isoformat() if isinstance(details_request.due_date, datetime) else details_request.due_date
-        
+
+        tid = UUID(str(task_id))
+        now = datetime.now(timezone.utc)
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('tasks').update(update_data).eq('id', str(task_id)).execute()
-        except AuthApiError as e:
+            cur = db.get(Task, tid)
+            if not cur:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Task not found"
+                )
+            cur.updated_at = now
+            if details_request.title is not None:
+                cur.title = details_request.title
+            if details_request.content is not None:
+                cur.content = details_request.content
+            if details_request.due_date is not None:
+                dd = details_request.due_date
+                if isinstance(dd, date) and not isinstance(dd, datetime):
+                    dd = datetime.combine(dd, datetime.min.time()).replace(tzinfo=timezone.utc)
+                cur.due_date = dd
+            db.commit()
+            db.refresh(cur)
+            row = cur
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to update task details: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task not found"
-            )
-        
-        # Invalidate project summary cache
-        project_id = response.data[0].get('project_id')
-        if project_id:
-            ProjectSummaryCache.delete_summary(str(project_id))
-        
+        finally:
+            db.close()
+
+        if row.project_id:
+            ProjectSummaryCache.delete_summary(str(row.project_id))
+
         assignee = None
-        if response.data[0].get('assignee_id'):
-            assignee = self._get_user_info(response.data[0]['assignee_id'])
-        
+        if row.assignee_id:
+            assignee = self._get_user_info(row.assignee_id)
+
         return TaskResponse(
-            id=response.data[0]['id'],
-            title=response.data[0]['title'],
-            content=response.data[0]['content'],
-            status=response.data[0]['status'],
-            due_date=response.data[0]['due_date'],
+            id=row.id,
+            title=row.title,
+            content=row.content,
+            status=TaskStatus(row.status),
+            due_date=row.due_date,
             assignee=assignee,
         )
 
@@ -896,32 +922,36 @@ class TaskService:
         Returns:
             bool: True if deletion was successful
         """
-        # Get project_id before deleting
+        tid = UUID(str(task_id))
+        uid = UUID(str(user_id))
         project_id = None
+        db = SyncSessionLocal()
         try:
-            task_response = supabase.table('tasks').select('project_id').eq('id', str(task_id)).execute()
-            if task_response.data and len(task_response.data) > 0:
-                project_id = task_response.data[0].get('project_id')
-        except Exception:
-            pass
-        
-        try:
-            # If force_delete is True (org admin/owner), don't filter by created_by
+            t = db.get(Task, tid)
+            if t:
+                project_id = t.project_id
             if force_delete:
-                response = supabase.table('tasks').delete().eq('id', str(task_id)).execute()
+                q = delete(Task).where(Task.id == tid)
             else:
-                response = supabase.table('tasks').delete().eq('id', str(task_id)).eq('created_by', str(user_id)).execute()
-        except AuthApiError as e:
+                q = delete(Task).where(and_(Task.id == tid, Task.created_by == uid))
+            r = db.execute(q)
+            db.commit()
+            if r.rowcount == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Task not found or already deleted"
+                )
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to delete task: {e}"
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Task not found or already deleted"
-            )
+        finally:
+            db.close()
         
         # Invalidate project summary cache and update project progress
         if project_id:
@@ -953,61 +983,67 @@ class TaskService:
         Returns paginated response with total count.
         """
         from app.schemas.tasks import TaskSubtasksPaginatedResponse
-        
-        query = supabase.table('tasks').select('*', count='exact').eq('parent_id', str(task_id)).order('created_at', desc=True)
-        
+
+        pid = UUID(str(task_id))
+        conds: List[Any] = [Task.parent_id == pid]
         if user_id:
-            query = query.eq('created_by', str(user_id))
+            conds.append(Task.created_by == UUID(str(user_id)))
         if assignee_id:
-            query = query.eq('assignee_id', str(assignee_id))
+            conds.append(Task.assignee_id == UUID(str(assignee_id)))
         if status:
-            query = query.eq('status', status.value)
+            conds.append(Task.status == status.value)
         if search:
-            query = query.ilike('title', f'%{search}%')
-        
-        limit, offset, query = apply_pagination(query, limit, offset)
-        
+            conds.append(Task.title.ilike(f"%{search}%"))
+        filt = and_(*conds)
+
+        lim, off = limit, offset
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
+            total_count = db.scalar(select(func.count()).select_from(Task).where(filt)) or 0
+            stmt = select(Task).where(filt).order_by(Task.created_at.desc())
+            if limit is not None or offset is not None:
+                off = offset if offset is not None else settings.DEFAULT_PAGINATION_OFFSET
+                lim = limit if limit is not None else settings.DEFAULT_PAGINATION_LIMIT
+                stmt = stmt.limit(lim).offset(off)
+            rows = list(db.scalars(stmt).all())
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get subtasks: {e}"
             )
-        
-        total_count = response.count if hasattr(response, 'count') and response.count is not None else len(response.data) if response.data else 0
-        
-        if not response.data:
+        finally:
+            db.close()
+
+        if not rows:
             return TaskSubtasksPaginatedResponse(
                 subtasks=[],
                 total=total_count,
-                offset=offset,
-                limit=limit,
+                offset=off,
+                limit=lim,
             )
-        
-        all_assignee_ids = set()
-        for task in response.data:
-            if task.get('assignee_id'):
-                all_assignee_ids.add(task['assignee_id'])
-        
+
+        all_assignee_ids = {r.assignee_id for r in rows if r.assignee_id}
         assignee_cache = {}
         if all_assignee_ids:
-            assignee_cache = self._batch_get_user_info([UUID4(uid) if isinstance(uid, str) else uid for uid in all_assignee_ids])
-        
-        subtasks = [TaskResponse(
-            id=task['id'],
-            title=task['title'],
-            content=task['content'],
-            status=task['status'],
-            due_date=task['due_date'],
-            assignee=assignee_cache.get(str(task['assignee_id'])) if task.get('assignee_id') else None,
-        ) for task in response.data]
-        
+            assignee_cache = self._batch_get_user_info([UUID4(str(uid)) for uid in all_assignee_ids])
+
+        subtasks = [
+            TaskResponse(
+                id=r.id,
+                title=r.title,
+                content=r.content,
+                status=TaskStatus(r.status),
+                due_date=r.due_date,
+                assignee=assignee_cache.get(str(r.assignee_id)) if r.assignee_id else None,
+            )
+            for r in rows
+        ]
+
         return TaskSubtasksPaginatedResponse(
             subtasks=subtasks,
             total=total_count,
-            offset=offset,
-            limit=limit,
+            offset=off,
+            limit=lim,
         )
     
     def get_user_tasks(

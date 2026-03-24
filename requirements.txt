@@ -1,5 +1,7 @@
 fastapi
 uvicorn
+sqlalchemy[asyncio]
+asyncpg
 pydantic[email]
 python-dotenv
 pydantic_settings
@@ -11,3 +13,6 @@ redis
 python-multipart
 pillow
 httpx
+passlib[bcrypt]
+python-jose[cryptography]
+psycopg2-binary

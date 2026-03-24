@@ -4,7 +4,11 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from app.core import supabase, supabase_auth_client
+from sqlalchemy import or_, select
+
+from app.core.security import TOKEN_TYPE_ACCESS, decode_token
+from app.db.sync_session import SyncSessionLocal
+from app.models import ChatConversation, OrganizationMember, ProjectMember
 from app.utils.websocket_manager import manager
 from app.services.chat import ChatService
 from app.schemas.chat import (
@@ -16,25 +20,34 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-async def verify_ws_token(token: str) -> dict:
-    """Verify JWT token and return user data"""
+async def verify_ws_token(token: str) -> dict | None:
+    """Verify JWT access token and return user data."""
     try:
-        response = supabase_auth_client.auth.get_user(token)
-        if not response or not response.user:
-            return None
-        return {"id": response.user.id, "email": response.user.email}
-    except Exception as e:
-        logger.error(f"Token verification failed: {e}")
+        payload = decode_token(token, expected_type=TOKEN_TYPE_ACCESS)
+        return {"id": payload["sub"], "email": payload.get("email", "")}
+    except ValueError as e:
+        logger.error("Token verification failed: %s", e)
         return None
 
 
 async def verify_project_access(user_id: str, project_id: str) -> bool:
     """Check if user is a project member"""
     try:
-        response = supabase.table('project_members').select('id').eq(
-            'project_id', project_id
-        ).eq('user_id', user_id).execute()
-        return bool(response.data)
+        from uuid import UUID
+
+        db = SyncSessionLocal()
+        try:
+            uid = UUID(user_id) if isinstance(user_id, str) else user_id
+            pid = UUID(project_id) if isinstance(project_id, str) else project_id
+            row = db.execute(
+                select(ProjectMember.id).where(
+                    ProjectMember.project_id == pid,
+                    ProjectMember.user_id == uid,
+                )
+            ).first()
+            return row is not None
+        finally:
+            db.close()
     except Exception:
         return False
 
@@ -42,10 +55,24 @@ async def verify_project_access(user_id: str, project_id: str) -> bool:
 async def verify_conversation_access(user_id: str, conversation_id: str) -> bool:
     """Check if user is a conversation participant"""
     try:
-        response = supabase.table('chat_conversations').select('id').eq(
-            'id', conversation_id
-        ).or_(f"user1_id.eq.{user_id},user2_id.eq.{user_id}").execute()
-        return bool(response.data)
+        from uuid import UUID
+
+        db = SyncSessionLocal()
+        try:
+            uid = UUID(user_id) if isinstance(user_id, str) else user_id
+            cid = UUID(conversation_id) if isinstance(conversation_id, str) else conversation_id
+            row = db.execute(
+                select(ChatConversation.id).where(
+                    ChatConversation.id == cid,
+                    or_(
+                        ChatConversation.user1_id == uid,
+                        ChatConversation.user2_id == uid,
+                    ),
+                )
+            ).first()
+            return row is not None
+        finally:
+            db.close()
     except Exception:
         return False
 
@@ -283,10 +310,19 @@ async def handle_dm_event(conversation_id: str, user_id: str, event: dict, webso
         )
         
         # Get organization_id from conversation
-        conv_response = supabase.table('chat_conversations').select('organization_id').eq('id', conversation_id).execute()
-        if not conv_response.data:
+        db = SyncSessionLocal()
+        try:
+            from uuid import UUID
+
+            cid = UUID(conversation_id) if isinstance(conversation_id, str) else conversation_id
+            conv = db.execute(
+                select(ChatConversation.organization_id).where(ChatConversation.id == cid)
+            ).first()
+        finally:
+            db.close()
+        if not conv:
             return
-        organization_id = conv_response.data[0]['organization_id']
+        organization_id = conv[0]
         
         response = chat_service.send_direct_message(
             UUID4(conversation_id),
@@ -328,15 +364,24 @@ async def handle_dm_event(conversation_id: str, user_id: str, event: dict, webso
         try:
             logger.info(f"[WS Read Receipt] DM chat - Processing read receipt - user_id: {user_id}, conversation_id: {conversation_id}, last_read_message_id: {message_id}")
             # Get organization_id from conversation
-            conv_response = supabase.table('chat_conversations').select('organization_id').eq('id', conversation_id).execute()
-            if not conv_response.data:
+            db = SyncSessionLocal()
+            try:
+                from uuid import UUID
+
+                cid = UUID(conversation_id) if isinstance(conversation_id, str) else conversation_id
+                conv_row = db.execute(
+                    select(ChatConversation.organization_id).where(ChatConversation.id == cid)
+                ).first()
+            finally:
+                db.close()
+            if not conv_row:
                 logger.warning(f"[WS Read Receipt] DM chat - Conversation {conversation_id} not found")
                 await websocket.send_text(json.dumps({
                     "type": "read_error",
                     "message": "Conversation not found"
                 }))
                 return
-            organization_id = conv_response.data[0]['organization_id']
+            organization_id = conv_row[0]
             
             chat_service = ChatService()
             marked_message_ids = chat_service.mark_dm_read(
@@ -407,11 +452,22 @@ async def inbox_websocket(
     user_id = user["id"]
     
     try:
-        response = supabase.table('organization_members').select('id').eq(
-            'org_id', org_id
-        ).eq('user_id', user_id).execute()
-        
-        if not response.data:
+        from uuid import UUID
+
+        db = SyncSessionLocal()
+        try:
+            oid = UUID(org_id) if isinstance(org_id, str) else org_id
+            uid = UUID(user_id) if isinstance(user_id, str) else user_id
+            row = db.execute(
+                select(OrganizationMember.id).where(
+                    OrganizationMember.org_id == oid,
+                    OrganizationMember.user_id == uid,
+                )
+            ).first()
+        finally:
+            db.close()
+
+        if not row:
             await websocket.accept()
             await websocket.send_text(json.dumps({"type": "error", "message": "Access denied"}))
             await websocket.close(code=4003)

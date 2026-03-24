@@ -16,9 +16,26 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = Field('http://194.195.119.112:8080', description="Frontend application URL used in email redirections")
     
     # Supabase Service Role Key (bypasses RLS for server-side operations)
-    SUPABASE_SERVICE_ROLE_KEY: str 
-    
-    
+    SUPABASE_SERVICE_ROLE_KEY: str
+
+    # SQLAlchemy async PostgreSQL (use asyncpg driver)
+    DATABASE_URL: str = Field(
+        ...,
+        description="e.g. postgresql+asyncpg://user:password@host:5432/dbname",
+    )
+
+    # JWT (local auth; sync URL derives postgresql:// for sync sessions)
+    JWT_SECRET_KEY: str = Field(
+        ...,
+        min_length=32,
+        description="HS256 signing secret (min 32 characters)",
+    )
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    JWT_EMAIL_VERIFY_TOKEN_EXPIRE_HOURS: int = 24
+    JWT_PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
+
     # AWS Credentials
     AWS_ACCESS_KEY_ID: str = Field(..., description="AWS Access Key ID")
     AWS_SECRET_ACCESS_KEY: str = Field(..., description="AWS Secret Access Key")

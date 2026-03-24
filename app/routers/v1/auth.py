@@ -1,4 +1,4 @@
-from fastapi import APIRouter, status, Depends, Request, Response, File, UploadFile, Query
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 
 from app.schemas.auth import (
     AuthLoginRequest, 
@@ -25,7 +25,10 @@ from app.services.auth import AuthService
 from app.services.files import FilesService
 from app.routers.deps import get_current_user
 from app.utils.redis_cache import UserMeCache
-from app.core import supabase
+from sqlalchemy import select
+
+from app.db.sync_session import SyncSessionLocal
+from app.models import Profile
 from pydantic import UUID4
 
 router = APIRouter()
@@ -47,12 +50,12 @@ def confirm(auth_request: AuthConfirmRequest, response: Response):
     return auth_service.confirm(auth_request, response)
 
 @router.post("/refresh", response_model=AuthRefreshTokenResponse, status_code=status.HTTP_200_OK)
-def refresh(request: Request):
+def refresh(request: Request, response: Response):
     """
         Refresh the access token
     """
     auth_service = AuthService()
-    return auth_service.refresh(request)
+    return auth_service.refresh(request, response)
 
 @router.post("/login", response_model=AuthLoginResponse, status_code=status.HTTP_200_OK)
 def login(auth_request: AuthLoginRequest, response: Response):
@@ -97,80 +100,72 @@ def get_me(user: any = Depends(get_current_user)):
     if cached_user:
         return User(**cached_user)
     
-    # Fetch user profile from profiles table
     try:
-        profile_response = supabase.table('profiles').select(
-            'display_name, email, timezone, avatar_file_id, browser_notifications'
-        ).eq('user_id', user_id_str).execute()
-        
-        if not profile_response.data or len(profile_response.data) == 0:
-            # Fallback to user data if profile doesn't exist
+        db = SyncSessionLocal()
+        try:
+            profile = db.execute(
+                select(Profile).where(Profile.user_id == user.id)
+            ).scalar_one_or_none()
+        finally:
+            db.close()
+
+        if not profile:
             display_name = (
-                user.user_metadata.get('display_name') or
-                user.user_metadata.get('name') or
-                user.user_metadata.get('full_name') or
-                user.email.split('@')[0] if user.email else 'User'
+                (user.user_metadata or {}).get("display_name")
+                or (user.user_metadata or {}).get("name")
+                or (user.user_metadata or {}).get("full_name")
+                or (user.email.split("@")[0] if user.email else "User")
             )
-            
             user_response = User(
-                id=user.id,
+                id=str(user.id),
                 display_name=display_name,
                 email=user.email,
-                timezone='UTC',
+                timezone="UTC",
                 avatar_url=None,
                 browser_notifications=True,
                 created_at=user.created_at,
-                updated_at=user.updated_at
+                updated_at=user.updated_at,
             )
         else:
-            profile = profile_response.data[0]
-            
-            # Get avatar URL if avatar_file_id exists
             avatar_url = None
-            if profile.get('avatar_file_id'):
+            if profile.avatar_file_id:
                 try:
                     files_service = FilesService()
-                    avatar_url = files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                    avatar_url = files_service.get_file_url(UUID4(str(profile.avatar_file_id)))
                 except Exception:
-                    # If avatar file doesn't exist or can't be accessed, set to None
                     avatar_url = None
-            
+
             user_response = User(
-                id=user.id,
-                display_name=profile['display_name'],
-                email=profile['email'],
-                timezone=profile.get('timezone', 'UTC'),
+                id=str(user.id),
+                display_name=profile.display_name or (user.email.split("@")[0] if user.email else "User"),
+                email=profile.email,
+                timezone=profile.timezone or "UTC",
                 avatar_url=avatar_url,
-                browser_notifications=profile.get('browser_notifications', True),
+                browser_notifications=profile.browser_notifications,
                 created_at=user.created_at,
-                updated_at=user.updated_at
+                updated_at=user.updated_at,
             )
-        
-        UserMeCache.set_user(user_id_str, user_response.model_dump(mode='json'))
-        
+
+        UserMeCache.set_user(user_id_str, user_response.model_dump(mode="json"))
         return user_response
-        
-    except Exception as e:
-        # Fallback to user data if profile fetch fails
+
+    except Exception:
         display_name = (
-            user.user_metadata.get('display_name') or
-            user.user_metadata.get('name') or
-            user.user_metadata.get('full_name') or
-            user.email.split('@')[0] if user.email else 'User'
+            (user.user_metadata or {}).get("display_name")
+            or (user.user_metadata or {}).get("name")
+            or (user.user_metadata or {}).get("full_name")
+            or (user.email.split("@")[0] if user.email else "User")
         )
-        
-        user_response = User(
-            id=user.id,
+        return User(
+            id=str(user.id),
             display_name=display_name,
             email=user.email,
-            timezone='UTC',
+            timezone="UTC",
             avatar_url=None,
             browser_notifications=True,
             created_at=user.created_at,
-            updated_at=user.updated_at
+            updated_at=user.updated_at,
         )
-        
-        return user_response
 
 @router.post("/change-password", response_model=AuthChangePasswordResponse, status_code=status.HTTP_200_OK)
 def change_password(auth_request: AuthChangePasswordRequest, user: any = Depends(get_current_user)):

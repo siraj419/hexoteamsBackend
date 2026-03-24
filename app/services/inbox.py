@@ -1,23 +1,25 @@
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+from uuid import UUID
+
 from fastapi import HTTPException, status
 from pydantic import UUID4
-from typing import Optional, Dict, Any
-from datetime import datetime, timezone, timedelta
-from supabase_auth.errors import AuthApiError
-import logging
-import json
+from sqlalchemy import delete, func, select, update
 
+from app.db.sync_session import SyncSessionLocal
+from app.models import Inbox as InboxRow
+from app.models import Profile
 from app.schemas.inbox import (
-    InboxResponse,
-    InboxGetResponse,
-    InboxGetPaginatedResponse,
-    InboxMarkReadResponse,
     InboxArchiveResponse,
-    InboxUnarchiveResponse,
     InboxDeleteResponse,
     InboxEventType,
+    InboxGetPaginatedResponse,
+    InboxGetResponse,
+    InboxMarkReadResponse,
+    InboxResponse,
+    InboxUnarchiveResponse,
 )
-
-from app.core import supabase
 from app.utils import calculate_time_ago
 from app.utils.redis_cache import cache_service
 
@@ -26,52 +28,50 @@ logger = logging.getLogger(__name__)
 
 class InboxService:
     CACHE_TTL = 300
-    
+
     def __init__(self):
         pass
-    
+
     def get_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxGetResponse:
         cache_key = f"inbox:{inbox_id}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return InboxGetResponse(**cached)
-        
+
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('inbox').select('*').eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
+            row = db.execute(
+                select(InboxRow).where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+            ).scalar_one_or_none()
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get inbox: {e}"
+                detail=f"Failed to get inbox: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Inbox not found"
-            )
-        
-        inbox_data = response.data[0]
+        finally:
+            db.close()
+
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+
         user_time_zone = self._get_user_time_zone(user_id)
-        message_time = calculate_time_ago(inbox_data['created_at'], user_time_zone)
-        
+        message_time = calculate_time_ago(row.created_at, user_time_zone)
         result = InboxGetResponse(
-            id=inbox_data['id'],
-            title=inbox_data['title'],
-            message=inbox_data['message'],
+            id=str(row.id),
+            title=row.title,
+            message=row.message,
             message_time=message_time,
-            is_read=inbox_data.get('is_read', False),
-            is_archived=inbox_data.get('is_archived', False),
-            event_type=inbox_data.get('event_type'),
-            reference_id=inbox_data.get('reference_id'),
+            is_read=row.is_read,
+            is_archived=row.is_archived,
+            event_type=row.event_type,
+            reference_id=str(row.reference_id) if row.reference_id else None,
         )
-        
-        # Cache the result
-        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
-        
+        cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL)
         return result
-    
+
     def create_inbox(
         self,
         title: str,
@@ -82,86 +82,85 @@ class InboxService:
         event_type: Optional[InboxEventType] = None,
         reference_id: Optional[UUID4] = None,
     ) -> InboxResponse:
-        
-        # Check for duplicate inbox notifications (same event_type, reference_id, user_id, org_id)
-        # created within the last minute to prevent duplicates from concurrent requests
         if event_type and reference_id:
+            db = SyncSessionLocal()
             try:
-                one_minute_ago = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-                existing = supabase.table('inbox').select('id').eq(
-                    'user_id', str(user_id)
-                ).eq('org_id', str(org_id)).eq('event_type', event_type.value).eq(
-                    'reference_id', str(reference_id)
-                ).gte('created_at', one_minute_ago).execute()
-                
-                if existing.data and len(existing.data) > 0:
-                    logger.info(f"Duplicate inbox notification prevented for user {user_id}, event_type {event_type.value}, reference_id {reference_id}")
-                    # Return the existing inbox notification
-                    existing_id = existing.data[0]['id']
-                    return self.get_inbox(UUID4(existing_id), user_id)
+                one_minute_ago = datetime.now(timezone.utc) - timedelta(minutes=1)
+                stmt = select(InboxRow.id).where(
+                    InboxRow.user_id == UUID(str(user_id)),
+                    InboxRow.org_id == UUID(str(org_id)),
+                    InboxRow.event_type == event_type.value,
+                    InboxRow.reference_id == UUID(str(reference_id)),
+                    InboxRow.created_at >= one_minute_ago,
+                )
+                existing_id = db.execute(stmt).scalar_one_or_none()
+                if existing_id:
+                    logger.info(
+                        "Duplicate inbox notification prevented for user %s, event_type %s, reference_id %s",
+                        user_id,
+                        event_type.value,
+                        reference_id,
+                    )
+                    dup = db.execute(select(InboxRow).where(InboxRow.id == existing_id)).scalar_one()
+                    utz = self._get_user_time_zone(user_id)
+                    return InboxResponse(
+                        id=str(dup.id),
+                        title=dup.title,
+                        message=dup.message,
+                        message_time=calculate_time_ago(dup.created_at, utz),
+                        is_read=dup.is_read,
+                        is_archived=dup.is_archived,
+                        event_type=dup.event_type,
+                        reference_id=str(dup.reference_id) if dup.reference_id else None,
+                    )
             except Exception as e:
-                logger.warning(f"Failed to check for duplicate inbox: {e}")
-                # Continue with creation if check fails
-        
+                logger.warning("Failed to check for duplicate inbox: %s", e)
+            finally:
+                db.close()
+
+        db = SyncSessionLocal()
         try:
-            insert_data = {
-                'title': title,
-                'message': message,
-                'user_id': str(user_id),
-                'org_id': str(org_id),
-                'user_by': str(user_by),
-                'is_read': False,
-                'is_archived': False,
-                'created_at': datetime.now(timezone.utc).isoformat(),
-            }
-            
-            if event_type:
-                insert_data['event_type'] = event_type.value
-            if reference_id:
-                insert_data['reference_id'] = str(reference_id)
-            
-            logger.info(f"Creating inbox notification for user {user_id}: {title}")
-            response = supabase.table('inbox').insert(insert_data).execute()
-            logger.info(f"Inbox notification created successfully. Response: {response.data}")
-        except AuthApiError as e:
-            logger.error(f"Database error creating inbox: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create inbox: {e}"
+            row = InboxRow(
+                title=title,
+                message=message,
+                user_id=UUID(str(user_id)),
+                org_id=UUID(str(org_id)),
+                user_by=UUID(str(user_by)),
+                is_read=False,
+                is_archived=False,
+                event_type=event_type.value if event_type else None,
+                reference_id=UUID(str(reference_id)) if reference_id else None,
+                created_at=datetime.now(timezone.utc),
             )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
         except Exception as e:
-            logger.error(f"Unexpected error creating inbox: {e}", exc_info=True)
+            db.rollback()
+            logger.error("Failed to create inbox: %s", e, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create inbox: {e}"
+                detail=f"Failed to create inbox: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            logger.error(f"Inbox insert returned no data. Response: {response}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create inbox"
-            )
-        
-        inbox_data = response.data[0]
+        finally:
+            db.close()
+
         user_time_zone = self._get_user_time_zone(user_id)
-        message_time = calculate_time_ago(inbox_data['created_at'], user_time_zone)
-        
+        message_time = calculate_time_ago(row.created_at, user_time_zone)
         self._invalidate_user_inbox_cache(user_id, org_id)
-        
         return InboxResponse(
-            id=inbox_data['id'],
-            title=inbox_data['title'],
-            message=inbox_data['message'],
+            id=str(row.id),
+            title=row.title,
+            message=row.message,
             message_time=message_time,
-            is_read=inbox_data.get('is_read', False),
-            is_archived=inbox_data.get('is_archived', False),
-            event_type=inbox_data.get('event_type'),
-            reference_id=inbox_data.get('reference_id'),
+            is_read=row.is_read,
+            is_archived=row.is_archived,
+            event_type=row.event_type,
+            reference_id=str(row.reference_id) if row.reference_id else None,
         )
-    
+
     def get_all_inbox(
-        self, 
+        self,
         user_id: UUID4,
         org_id: UUID4,
         include_archived: bool = False,
@@ -170,278 +169,339 @@ class InboxService:
         limit: Optional[int] = 50,
         offset: Optional[int] = 0,
     ) -> InboxGetPaginatedResponse:
-        # Normalize order_by to ensure valid value
-        if order_by not in ["asc", "desc"]:
+        if order_by not in ("asc", "desc"):
             order_by = "desc"
-        
+
         cache_key = f"inbox:list:{user_id}:{org_id}:{include_archived}:{unread_only}:{order_by}:{limit}:{offset}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return InboxGetPaginatedResponse(**cached)
-        
-        query = supabase.table('inbox').select('*', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id))
-        
-        if not include_archived:
-            query = query.eq('is_archived', False)
-        
-        if unread_only:
-            query = query.eq('is_read', False)
-        
-        # Apply ordering by created_at
-        if order_by == "asc":
-            query = query.order('created_at', desc=False)
-        else:
-            query = query.order('created_at', desc=True)
-        
-        query = query.range(offset, offset + limit - 1)
-        
+
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            filt: Any = (InboxRow.user_id == UUID(str(user_id))) & (
+                InboxRow.org_id == UUID(str(org_id))
+            )
+            if not include_archived:
+                filt = filt & (InboxRow.is_archived.is_(False))
+            if unread_only:
+                filt = filt & (InboxRow.is_read.is_(False))
+
+            total = db.execute(
+                select(func.count()).select_from(InboxRow).where(filt)
+            ).scalar() or 0
+
+            stmt = select(InboxRow).where(filt)
+            if order_by == "asc":
+                stmt = stmt.order_by(InboxRow.created_at.asc())
+            else:
+                stmt = stmt.order_by(InboxRow.created_at.desc())
+            off = offset or 0
+            lim = limit or 50
+            stmt = stmt.offset(off).limit(lim)
+            rows = list(db.execute(stmt).scalars().all())
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get all inbox: {e}"
+                detail=f"Failed to get all inbox: {e}",
             )
-        
+        finally:
+            db.close()
+
         user_time_zone = self._get_user_time_zone(user_id)
-            
-        inboxes = []
-        for inbox in response.data:
-            message_time = calculate_time_ago(inbox['created_at'], user_time_zone)
-            inboxes.append(InboxResponse(
-                id=inbox['id'],
-                title=inbox['title'],
-                message=inbox['message'],
-                message_time=message_time,
-                is_read=inbox.get('is_read', False),
-                is_archived=inbox.get('is_archived', False),
-                event_type=inbox.get('event_type'),
-                reference_id=inbox.get('reference_id'),
-            ))
-        
+        inboxes = [
+            InboxResponse(
+                id=str(r.id),
+                title=r.title,
+                message=r.message,
+                message_time=calculate_time_ago(r.created_at, user_time_zone),
+                is_read=r.is_read,
+                is_archived=r.is_archived,
+                event_type=r.event_type,
+                reference_id=str(r.reference_id) if r.reference_id else None,
+            )
+            for r in rows
+        ]
         result = InboxGetPaginatedResponse(
             inbox=inboxes,
-            total=response.count if response.count else 0,
-            offset=offset,
-            limit=limit,
+            total=total,
+            offset=off,
+            limit=lim,
         )
-        
-        # Cache the result
-        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
-        
+        cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL)
         return result
-    
+
     def get_archived_inbox(
-        self, 
+        self,
         user_id: UUID4,
         org_id: UUID4,
         limit: Optional[int] = 50,
         offset: Optional[int] = 0,
     ) -> InboxGetPaginatedResponse:
-        """Get only archived inbox notifications with pagination."""
         cache_key = f"inbox:archived:{user_id}:{org_id}:{limit}:{offset}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return InboxGetPaginatedResponse(**cached)
-        
-        query = supabase.table('inbox').select('*', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id)).eq('is_archived', True)
-        
-        query = query.order('created_at', desc=True).range(offset, offset + limit - 1)
-        
+
+        db = SyncSessionLocal()
         try:
-            response = query.execute()
-        except AuthApiError as e:
+            filt = (
+                (InboxRow.user_id == UUID(str(user_id)))
+                & (InboxRow.org_id == UUID(str(org_id)))
+                & (InboxRow.is_archived.is_(True))
+            )
+            total = db.execute(
+                select(func.count()).select_from(InboxRow).where(filt)
+            ).scalar() or 0
+            off = offset or 0
+            lim = limit or 50
+            rows = list(
+                db.execute(
+                    select(InboxRow)
+                    .where(filt)
+                    .order_by(InboxRow.created_at.desc())
+                    .offset(off)
+                    .limit(lim)
+                )
+                .scalars()
+                .all()
+            )
+        except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to get archived inbox: {e}"
+                detail=f"Failed to get archived inbox: {e}",
             )
-        
+        finally:
+            db.close()
+
         user_time_zone = self._get_user_time_zone(user_id)
-            
-        inboxes = []
-        for inbox in response.data:
-            message_time = calculate_time_ago(inbox['created_at'], user_time_zone)
-            inboxes.append(InboxResponse(
-                id=inbox['id'],
-                title=inbox['title'],
-                message=inbox['message'],
-                message_time=message_time,
-                is_read=inbox.get('is_read', False),
-                is_archived=inbox.get('is_archived', False),
-                event_type=inbox.get('event_type'),
-                reference_id=inbox.get('reference_id'),
-            ))
-        
+        inboxes = [
+            InboxResponse(
+                id=str(r.id),
+                title=r.title,
+                message=r.message,
+                message_time=calculate_time_ago(r.created_at, user_time_zone),
+                is_read=r.is_read,
+                is_archived=r.is_archived,
+                event_type=r.event_type,
+                reference_id=str(r.reference_id) if r.reference_id else None,
+            )
+            for r in rows
+        ]
         result = InboxGetPaginatedResponse(
             inbox=inboxes,
-            total=response.count if response.count else 0,
-            offset=offset,
-            limit=limit,
+            total=total,
+            offset=off,
+            limit=lim,
         )
-        
-        # Cache the result
-        cache_service.set(cache_key, result.model_dump(mode='json'), ttl=self.CACHE_TTL)
-        
+        cache_service.set(cache_key, result.model_dump(mode="json"), ttl=self.CACHE_TTL)
         return result
-    
+
     def mark_read(self, inbox_id: UUID4, user_id: UUID4) -> InboxMarkReadResponse:
+        db = SyncSessionLocal()
+        org_id: Optional[str] = None
         try:
-            response = supabase.table('inbox').update({
-                'is_read': True,
-                'read_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to mark inbox as read: {e}"
-            )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Inbox not found"
-            )
-        
-        self._invalidate_inbox_cache(inbox_id, user_id, response.data[0].get('org_id'))
-        
-        return InboxMarkReadResponse(success=True, message="Inbox marked as read")
-    
-    def archive_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxArchiveResponse:
-        try:
-            response = supabase.table('inbox').update({
-                'is_archived': True,
-                'archived_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to archive inbox: {e}"
-            )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Inbox not found"
-            )
-        
-        self._invalidate_inbox_cache(inbox_id, user_id, response.data[0].get('org_id'))
-        
-        return InboxArchiveResponse(success=True, message="Inbox archived successfully")
-    
-    def unarchive_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxUnarchiveResponse:
-        try:
-            response = supabase.table('inbox').update({
-                'is_archived': False,
-                'archived_at': None,
-            }).eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to unarchive inbox: {e}"
-            )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Inbox not found"
-            )
-        
-        self._invalidate_inbox_cache(inbox_id, user_id, response.data[0].get('org_id'))
-        
-        return InboxUnarchiveResponse(success=True, message="Inbox restored successfully")
-    
-    def delete_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxDeleteResponse:
-        try:
-            check_response = supabase.table('inbox').select('org_id').eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-            
-            if not check_response.data or len(check_response.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Inbox not found"
+            inbox = db.execute(
+                select(InboxRow).where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
                 )
-            
-            org_id = check_response.data[0].get('org_id')
-            
-            response = supabase.table('inbox').delete().eq('id', str(inbox_id)).eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
+            ).scalar_one_or_none()
+            if not inbox:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+            org_id = str(inbox.org_id)
+            db.execute(
+                update(InboxRow)
+                .where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+                .values(
+                    is_read=True,
+                    read_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete inbox: {e}"
+                detail=f"Failed to mark inbox as read: {e}",
             )
-        
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(    
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Inbox not found"
+        finally:
+            db.close()
+
+        if org_id:
+            self._invalidate_inbox_cache(inbox_id, user_id, org_id)
+        return InboxMarkReadResponse(success=True, message="Inbox marked as read")
+
+    def archive_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxArchiveResponse:
+        db = SyncSessionLocal()
+        try:
+            res = db.execute(
+                update(InboxRow)
+                .where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+                .values(
+                    is_archived=True,
+                    archived_at=datetime.now(timezone.utc),
+                )
             )
-        
-        self._invalidate_inbox_cache(inbox_id, user_id, org_id)
-        
+            db.commit()
+            if res.rowcount == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+            org_id = db.execute(
+                select(InboxRow.org_id).where(InboxRow.id == UUID(str(inbox_id)))
+            ).scalar_one_or_none()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to archive inbox: {e}",
+            )
+        finally:
+            db.close()
+
+        self._invalidate_inbox_cache(inbox_id, user_id, str(org_id) if org_id else None)
+        return InboxArchiveResponse(success=True, message="Inbox archived successfully")
+
+    def unarchive_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxUnarchiveResponse:
+        db = SyncSessionLocal()
+        try:
+            res = db.execute(
+                update(InboxRow)
+                .where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+                .values(is_archived=False, archived_at=None)
+            )
+            db.commit()
+            if res.rowcount == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+            org_id = db.execute(
+                select(InboxRow.org_id).where(InboxRow.id == UUID(str(inbox_id)))
+            ).scalar_one_or_none()
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to unarchive inbox: {e}",
+            )
+        finally:
+            db.close()
+
+        self._invalidate_inbox_cache(inbox_id, user_id, str(org_id) if org_id else None)
+        return InboxUnarchiveResponse(success=True, message="Inbox restored successfully")
+
+    def delete_inbox(self, inbox_id: UUID4, user_id: UUID4) -> InboxDeleteResponse:
+        db = SyncSessionLocal()
+        try:
+            org_id = db.execute(
+                select(InboxRow.org_id).where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+            ).scalar_one_or_none()
+            if not org_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+            res = db.execute(
+                delete(InboxRow).where(
+                    InboxRow.id == UUID(str(inbox_id)),
+                    InboxRow.user_id == UUID(str(user_id)),
+                )
+            )
+            db.commit()
+            if res.rowcount == 0:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox not found")
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete inbox: {e}",
+            )
+        finally:
+            db.close()
+
+        self._invalidate_inbox_cache(inbox_id, user_id, str(org_id))
         return InboxDeleteResponse(success=True, message="Inbox deleted successfully")
-    
+
     def get_unread_count(self, user_id: UUID4, org_id: UUID4) -> int:
         cache_key = f"inbox:unread:{user_id}:{org_id}"
-        
-        # Check cache first (shorter TTL for unread count)
         cached = cache_service.get(cache_key)
         if cached is not None:
             return int(cached)
-        
+
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('inbox').select('id', count='exact').eq('user_id', str(user_id)).eq('org_id', str(org_id)).eq('is_read', False).eq('is_archived', False).execute()
-            count = response.count if response.count else 0
-        except AuthApiError as e:
-            logger.error(f"Failed to get unread count: {e}")
+            count = db.execute(
+                select(func.count())
+                .select_from(InboxRow)
+                .where(
+                    InboxRow.user_id == UUID(str(user_id)),
+                    InboxRow.org_id == UUID(str(org_id)),
+                    InboxRow.is_read.is_(False),
+                    InboxRow.is_archived.is_(False),
+                )
+            ).scalar() or 0
+        except Exception as e:
+            logger.error("Failed to get unread count: %s", e)
             return 0
-        
-        # Cache the result (shorter TTL for unread count - 60 seconds)
+        finally:
+            db.close()
+
         cache_service.set(cache_key, count, ttl=60)
-        
         return count
-    
+
     def _get_user_time_zone(self, user_id: UUID4) -> str:
         cache_key = f"user:timezone:{user_id}"
-        
-        # Check cache first
         cached = cache_service.get(cache_key)
         if cached:
             return cached
-        
+
+        db = SyncSessionLocal()
         try:
-            response = supabase.table('profiles').select('timezone').eq('user_id', str(user_id)).execute()
-        except AuthApiError as e:
-            logger.error(f"Failed to get user timezone: {e}")
-            return 'UTC'
-        
-        if not response.data or len(response.data) == 0:
-            return 'UTC'
-        
-        timezone_val = response.data[0].get('timezone', 'UTC')
-        
-        # Cache the result (1 hour TTL - timezone rarely changes)
+            tz = db.execute(
+                select(Profile.timezone).where(Profile.user_id == UUID(str(user_id)))
+            ).scalar_one_or_none()
+        except Exception as e:
+            logger.error("Failed to get user timezone: %s", e)
+            return "UTC"
+        finally:
+            db.close()
+
+        timezone_val = tz or "UTC"
         cache_service.set(cache_key, timezone_val, ttl=3600)
-        
         return timezone_val
-    
-    def _invalidate_inbox_cache(self, inbox_id: UUID4, user_id: UUID4, org_id: Optional[str] = None):
+
+    def _invalidate_inbox_cache(
+        self, inbox_id: UUID4, user_id: UUID4, org_id: Optional[str] = None
+    ):
         try:
             cache_service.delete(f"inbox:{inbox_id}")
             if org_id:
                 self._invalidate_user_inbox_cache(user_id, UUID4(org_id))
         except Exception as e:
-            logger.warning(f"Redis delete error: {e}")
-    
+            logger.warning("Redis delete error: %s", e)
+
     def _invalidate_user_inbox_cache(self, user_id: UUID4, org_id: UUID4):
-        from app.utils.redis_cache import cache_service
-        
         try:
-            # Use pattern-based invalidation
             cache_service.invalidate_pattern(f"inbox:list:{user_id}:{org_id}:*")
             cache_service.invalidate_pattern(f"inbox:archived:{user_id}:{org_id}:*")
             cache_service.delete(f"inbox:unread:{user_id}:{org_id}")
         except Exception as e:
-            logger.warning(f"Redis delete error: {e}")
+            logger.warning("Redis delete error: %s", e)
