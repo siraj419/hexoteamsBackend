@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import urllib.parse
 from datetime import datetime, timezone
@@ -47,30 +46,10 @@ from app.schemas.auth import (
 )
 from app.services.files import FilesService
 from app.services.time_log import TimeLogService
+from app.tasks.tasks import send_password_reset_email, send_signup_confirmation_email
 from app.utils.redis_cache import UserMeCache
 
 logger = logging.getLogger(__name__)
-
-
-def _send_email_sync(
-    email: EmailStr,
-    subject: str,
-    *,
-    text_content: str | None = None,
-    email_template: str | None = None,
-    template_vars: dict[str, str] | None = None,
-) -> None:
-    from app.core import mailer
-
-    asyncio.run(
-        mailer.send_email(
-            email=email,
-            subject=subject,
-            text_content=text_content,
-            email_template=email_template,
-            template_vars=template_vars,
-        )
-    )
 
 
 def _issue_session(response: Response, user_id: UUID, email: str) -> tuple[str, int]:
@@ -122,13 +101,7 @@ class AuthService:
                 f"{settings.FRONTEND_URL.rstrip('/')}/email-verification?"
                 f"token={urllib.parse.quote(verify_jwt)}"
             )
-            _send_email_sync(
-                email_norm,
-                "Verify your email",
-                text_content=f"Confirm your account:\n{verify_url}\n",
-                email_template="signup_confirmation.html",
-                template_vars={"ConfirmationURL": verify_url},
-            )
+            send_signup_confirmation_email.delay(str(email_norm), verify_url)
         except HTTPException:
             db.rollback()
             raise
@@ -264,13 +237,7 @@ class AuthService:
                 reset_jwt = create_password_reset_token(profile.user_id, profile.email)
                 base = settings.FRONTEND_URL.rstrip("/")
                 reset_url = f"{base}/reset-password?token={urllib.parse.quote(reset_jwt)}"
-                _send_email_sync(
-                    email_norm,
-                    "Password reset",
-                    text_content=f"Reset your password:\n{reset_url}\n",
-                    email_template="reset_password.html",
-                    template_vars={"ConfirmationURL": reset_url},
-                )
+                send_password_reset_email.delay(str(email_norm), reset_url)
         finally:
             db.close()
 
