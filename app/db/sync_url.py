@@ -1,6 +1,7 @@
 """Sync SQLAlchemy URL (psycopg2) for SyncSessionLocal and Alembic."""
 
-from app.core.config import normalize_async_database_url, settings
+from app.core import settings
+from app.core.config import normalize_async_database_url
 
 
 def get_sync_database_url() -> str:
