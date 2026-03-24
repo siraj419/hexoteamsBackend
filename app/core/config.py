@@ -1,6 +1,20 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Optional, List
+
+
+def normalize_async_database_url(url: str) -> str:
+    """
+    SQLAlchemy has no dialect named 'postgres' (Heroku-style postgres:// breaks).
+    Async engine requires the asyncpg driver in the URL.
+    """
+    u = url.strip()
+    if u.startswith("postgres://"):
+        return "postgresql+asyncpg://" + u[len("postgres://") :]
+    if u.startswith("postgresql://") and not u.startswith("postgresql+"):
+        return "postgresql+asyncpg://" + u[len("postgresql://") :]
+    return u
+
 
 class Settings(BaseSettings):
     # App Details
@@ -14,8 +28,15 @@ class Settings(BaseSettings):
     # SQLAlchemy async PostgreSQL (use asyncpg driver)
     DATABASE_URL: str = Field(
         ...,
-        description="e.g. postgresql+asyncpg://user:password@host:5432/dbname",
+        description="postgresql+asyncpg://... (postgres:// and postgresql:// are normalized)",
     )
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, v: object) -> object:
+        if isinstance(v, str):
+            return normalize_async_database_url(v)
+        return v
 
     # JWT (local auth; sync URL derives postgresql:// for sync sessions)
     JWT_SECRET_KEY: str = Field(
