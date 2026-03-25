@@ -9,3 +9,6 @@ Dockerfile
 docker-compose.yml
 DOCKER_SETUP.md
 .dockerignore
+
+# logs
+*.log
