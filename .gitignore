@@ -1,0 +1,18 @@
+__pycache__/
+venv/
+*.sql
+time_log_endpoints.txt
+test_websocket.py
+INBOX_IMPLEMENTATION_SUMMARY.md
+.env
+Dockerfile
+docker-compose.yml
+DOCKER_SETUP.md
+.dockerignore
+
+# logs
+*.log
+
+# migrations
+alembic/versions/*
+migrations/*
