@@ -13,17 +13,21 @@ Default port: **`APP_PORT`** in `.env` (often **8002**). Interactive docs: **`ht
 1. In the **`hexoteamsBackend`** folder, copy **`example.env`** to **`.env`**.
 2. Edit **`.env`** with real secrets and URLs. The app loads these automatically on startup (do not commit **`.env`** to git).
 
-| Area | What to set |
-|------|-------------|
-| **App** | `APP_PORT` — HTTP port for the API. `FRONTEND_URL` — public URL of the web app (used in emails and links). |
-| **Database** | `DATABASE_URL` — PostgreSQL connection string. Use the `postgresql+asyncpg://user:password@host:port/database` form shown in `example.env`. |
-| **JWT** | `JWT_SECRET_KEY` — long random string (at least 32 characters). Other `JWT_*` keys control token lifetimes; defaults in `example.env` are fine to start. |
-| **AWS / S3** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET_NAME` — file uploads and presigned URLs. Optional `S3_ENDPOINT_URL` for MinIO or similar. |
-| **SMTP** | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_USE_STARTTLS`, `FROM_EMAIL`, `FROM_NAME` — outgoing mail (signup verification, password reset, invitations). |
-| **Redis** | `REDIS_URL` — e.g. `redis://localhost:6379/0` for caching, Celery, and realtime helpers. |
-| **Optional** | `EMAIL_TEMPLATES_PATH`, pagination limits, invitation expiry, comment/subtask depth — usually leave as in `example.env` unless you need to change behavior. |
+**App:** Set `APP_PORT` for the HTTP port. Set `FRONTEND_URL` to the public URL of the web app (emails and links use this).
 
-For a full list of keys and placeholders, open **`example.env`** in this repo.
+**Database:** Set `DATABASE_URL` to your PostgreSQL URL. Follow the `postgresql+asyncpg://user:password@host:port/database` pattern in `example.env`.
+
+**JWT:** Set `JWT_SECRET_KEY` to a long random value (at least 32 characters). The other `JWT_*` variables control token lifetimes; the defaults in `example.env` are usually enough to start.
+
+**AWS / S3:** Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and `S3_BUCKET_NAME` for uploads and presigned URLs. Use `S3_ENDPOINT_URL` if you use MinIO or another S3-compatible endpoint.
+
+**SMTP:** Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `SMTP_USE_STARTTLS`, `FROM_EMAIL`, and `FROM_NAME` for outgoing mail (verification, password reset, invitations).
+
+**Redis:** Set `REDIS_URL` (for example `redis://localhost:6379/0`) for caching, Celery, and realtime helpers.
+
+**Optional:** Values such as `EMAIL_TEMPLATES_PATH`, pagination limits, invitation expiry, and comment/subtask depth are in `example.env`; change them only if you need different behavior.
+
+For every key and placeholder, see **`example.env`** in this repo.
 
 ---
 
