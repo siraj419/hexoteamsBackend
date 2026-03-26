@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, Depends, status, HTTPException, Query
+from fastapi import APIRouter, Depends, status, HTTPException, Query
 from pydantic import UUID4
 from typing import Optional
 
@@ -21,18 +21,6 @@ def check_organization_admin_or_owner(active_organization: any) -> None:
     return  active_organization['member_role'] == OrganizationMemberRole.ADMIN.value or \
             active_organization['member_role'] == OrganizationMemberRole.OWNER.value
         
-
-@router.post('/upload', response_model=FileBaseResponse, status_code=status.HTTP_201_CREATED)
-def upload_file(
-    file: UploadFile = File(...),
-    active_organization: any = Depends(get_active_organization)
-):
-    """
-        Upload a file to the server
-    """
-    files_service = FilesService()
-    file_data = files_service.upload_file(file, user_id=active_organization['member_user_id'], org_id=active_organization['id'])
-    return file_data
 
 @router.get('/{file_id}', response_model=FileGetResponseWithUser, status_code=status.HTTP_200_OK)
 def get_file(

@@ -397,6 +397,7 @@ class FilesService:
             conditions.append(FileModel.project_id == PyUUID(str(project_id)))
         if is_deleted:
             conditions.append(FileModel.is_deleted.is_(True))
+        conditions.append(FileModel.upload_status != "pending")
 
         base = select(FileModel).order_by(FileModel.created_at.desc())
         if conditions:

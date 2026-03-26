@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     # File Upload Settings
     S3_MAX_FILE_SIZE_MB: int = Field(default=100, description="Maximum file size in MB")
     S3_PUBLIC_READ: bool = Field(default=False, description="Make uploaded files publicly readable")
-    S3_ALLOWED_EXTENSIONS_LIST: List[str] = Field(default=["jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "webp", "svg", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"], description="Allowed file extensions")
+    S3_ALLOWED_EXTENSIONS_LIST: List[str] = Field(default=["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "ico", "webp", "svg", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"], description="Allowed file extensions")
     
     # Email Settings
     SMTP_HOST: str

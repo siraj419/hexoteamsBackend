@@ -18,6 +18,9 @@ from app.core import settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Direct-to-S3 presigned POST policies always expire in exactly 5 minutes (not configurable).
+S3_PRESIGNED_POST_EXPIRATION_SECONDS = 300
+
 
 class S3ServiceException(Exception):
     """Base exception for S3 service errors"""
@@ -574,39 +577,62 @@ class S3Service:
     def generate_presigned_post(
         self,
         key: str,
+        content_type: str,
         bucket_name: Optional[str] = None,
-        expiration: Optional[int] = None,
-        max_size_mb: Optional[int] = None
     ) -> Dict[str, Any]:
+        """
+        Generate a presigned POST policy for direct browser upload.
+
+        Policy constraints (fixed):
+        - Expires in exactly 300 seconds (5 minutes).
+        - content-length-range [0, S3_MAX_FILE_SIZE_MB].
+        - Content-Type must match the provided value (strict).
+        - Optional ACL public-read when S3_PUBLIC_READ is enabled.
+        """
         self._ensure_initialized()
-        """
-        Generate a presigned POST for direct browser upload.
-        
-        Args:
-            key: S3 object key
-            bucket_name: Bucket name (uses default if None)
-            expiration: URL expiration in seconds
-            max_size_mb: Maximum file size in MB
-        
-        Returns:
-            Dict containing presigned POST data (url and fields)
-        """
         bucket = bucket_name or settings.S3_BUCKET_NAME
-        expiration = expiration or settings.S3_PRESIGNED_URL_EXPIRATION
-        max_size = (max_size_mb or settings.S3_MAX_FILE_SIZE_MB) * 1024 * 1024
-        
+        max_bytes = settings.S3_MAX_FILE_SIZE_MB * 1024 * 1024
+        ct = (content_type or '').strip()
+        if not ct:
+            raise S3ServiceException("content_type is required for presigned POST")
+
+        fields: Dict[str, str] = {'Content-Type': ct}
+        conditions: List[Any] = [
+            ['eq', '$Content-Type', ct],
+            ['content-length-range', 0, max_bytes],
+        ]
+        if settings.S3_PUBLIC_READ:
+            fields['acl'] = 'public-read'
+            conditions.append(['eq', '$acl', 'public-read'])
+
+        expires_in = S3_PRESIGNED_POST_EXPIRATION_SECONDS
+
         try:
-            conditions = [
-                ['content-length-range', 0, max_size]
-            ]
-            
-            response = self.s3_client.generate_presigned_post(
+            is_minio = settings.S3_ENDPOINT_URL is not None and settings.S3_ENDPOINT_URL != ''
+            if is_minio:
+                presigned_config = BotoConfig(
+                    signature_version='s3v4',
+                    s3={'addressing_style': 'path'},
+                )
+                post_client = boto3.client(
+                    's3',
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    config=presigned_config,
+                    endpoint_url=settings.S3_ENDPOINT_URL,
+                    use_ssl=settings.S3_USE_SSL,
+                    region_name=settings.AWS_REGION,
+                )
+            else:
+                post_client = self.s3_client
+
+            response = post_client.generate_presigned_post(
                 Bucket=bucket,
                 Key=key,
-                ExpiresIn=expiration,
-                Conditions=conditions
+                Fields=fields,
+                Conditions=conditions,
+                ExpiresIn=expires_in,
             )
-            
             return response
         except ClientError as e:
             logger.error(f"Failed to generate presigned POST: {str(e)}")
@@ -629,6 +655,7 @@ class S3Service:
         Returns:
             Dict containing file metadata
         """
+        self._ensure_initialized()
         bucket = bucket_name or settings.S3_BUCKET_NAME
         
         try:
@@ -894,7 +921,23 @@ class S3Service:
             True if extension is allowed, False otherwise
         """
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-        return ext in settings.S3_ALLOWED_EXTENSIONS_LIST
+        allowed = {e.lower().lstrip('.') for e in settings.S3_ALLOWED_EXTENSIONS_LIST}
+        return ext in allowed
+
+    def validate_mime_matches_extension(self, filename: str, content_type: Optional[str]) -> bool:
+        """
+        Ensure Content-Type matches the filename extension (per allowed extensions list).
+        """
+        if not content_type or not filename or '.' not in filename:
+            return False
+        ext = filename.rsplit('.', 1)[-1].lower()
+        allowed = {e.lower().lstrip('.') for e in settings.S3_ALLOWED_EXTENSIONS_LIST}
+        if ext not in allowed:
+            return False
+        expected = mimetypes.guess_type(f'x.{ext}')[0]
+        if not expected:
+            return False
+        return content_type.strip().lower() == expected.lower()
     
     def validate_file_size(self, size_bytes: int) -> bool:
         """
