@@ -1,8 +1,9 @@
 """WebSocket routes.
 
 Auth (choose one):
-- Query `?ticket=<short-lived ticket>` from POST /api/v1/ws/ticket (Brave-friendly).
-- Or Sec-WebSocket-Protocol `hexoteams-auth` with base64url(UTF-8 JWT) (legacy).
+- Sec-WebSocket-Protocol: `hexoteams-ticket, <ticket>` (ticket from POST /api/v1/ws/ticket; preferred).
+- Or query `?ticket=<ticket>` (legacy / fallback).
+- Or `hexoteams-auth` with base64url(UTF-8 JWT) (legacy).
 """
 
 from __future__ import annotations
@@ -22,7 +23,11 @@ from app.routers.deps import get_current_user
 from app.services.chat import ChatService
 from app.utils.uuid_compat import as_uuid
 from app.utils.websocket_manager import manager
-from app.utils.ws_auth import WS_PROTOCOL_AUTH, get_access_token_from_websocket_protocol
+from app.utils.ws_auth import (
+    WS_PROTOCOL_AUTH,
+    get_access_token_from_websocket_protocol,
+    get_ws_ticket_from_websocket_protocol,
+)
 from app.utils.ws_ticket_store import consume_ws_ticket, issue_ws_ticket
 from app.schemas.chat import (
     ProjectMessageCreate,
@@ -102,21 +107,32 @@ async def create_websocket_ticket(user: AuthenticatedUser = Depends(get_current_
     return WebSocketTicketResponse(ticket=ticket)
 
 
-async def _user_from_ticket_or_protocol(
+async def _consume_ws_ticket_from_request(
     websocket: WebSocket,
-) -> tuple[dict[str, Any] | None, Literal["invalid_ticket"] | None, bool]:
+) -> tuple[dict[str, Any] | None, Literal["invalid_ticket"] | None, str | None, bool]:
     """
-    Returns (user dict, invalid_ticket marker, used_ticket_auth).
-    If invalid_ticket is set, close with 1008 and return.
-    If user is None and not invalid_ticket, JWT path should be tried.
+    Validate short-lived ticket from handshake.
+
+    Returns (user, invalid_ticket, negotiate_subprotocol, used_ticket).
+    negotiate_subprotocol: ticket string for accept() when using hexoteams-ticket, <ticket>;
+    None when using ?ticket= or when not ticket auth.
+    used_ticket: True if user was authenticated via ticket (query or protocol).
     """
+    proto_ticket = get_ws_ticket_from_websocket_protocol(websocket)
+    if proto_ticket is not None:
+        user_id = await consume_ws_ticket(proto_ticket)
+        if not user_id:
+            return None, "invalid_ticket", None, True
+        return {"id": user_id, "email": ""}, None, proto_ticket, True
+
     raw_ticket = websocket.query_params.get("ticket")
     if raw_ticket is not None and raw_ticket.strip():
-        user_id = await consume_ws_ticket(raw_ticket)
+        user_id = await consume_ws_ticket(raw_ticket.strip())
         if not user_id:
-            return None, "invalid_ticket", True
-        return {"id": user_id, "email": ""}, None, True
-    return None, None, False
+            return None, "invalid_ticket", None, True
+        return {"id": user_id, "email": ""}, None, None, True
+
+    return None, None, None, False
 
 
 @router.websocket("/project/{project_id}")
@@ -138,7 +154,7 @@ async def project_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
-    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    user, ticket_err, ticket_subproto, used_ticket = await _consume_ws_ticket_from_request(websocket)
     if ticket_err:
         await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
@@ -166,9 +182,8 @@ async def project_chat_websocket(
         await websocket.close(code=4003)
         return
 
-    await manager.connect_project(
-        websocket, project_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
-    )
+    negotiate = ticket_subproto if used_ticket else WS_PROTOCOL_AUTH
+    await manager.connect_project(websocket, project_id, user_id, subprotocol=negotiate)
     
     try:
         while True:
@@ -213,7 +228,7 @@ async def dm_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
-    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    user, ticket_err, ticket_subproto, used_ticket = await _consume_ws_ticket_from_request(websocket)
     if ticket_err:
         await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
@@ -241,9 +256,8 @@ async def dm_chat_websocket(
         await websocket.close(code=4003)
         return
 
-    await manager.connect_dm(
-        websocket, conversation_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
-    )
+    negotiate = ticket_subproto if used_ticket else WS_PROTOCOL_AUTH
+    await manager.connect_dm(websocket, conversation_id, user_id, subprotocol=negotiate)
     
     try:
         while True:
@@ -493,7 +507,7 @@ async def inbox_websocket(
     - {"type": "unread_count", "count": 5}
     - {"type": "error", "message": "..."}
     """
-    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    user, ticket_err, ticket_subproto, used_ticket = await _consume_ws_ticket_from_request(websocket)
     if ticket_err:
         await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
@@ -543,9 +557,8 @@ async def inbox_websocket(
         await websocket.close(code=4003)
         return
 
-    await manager.connect_inbox(
-        websocket, org_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
-    )
+    negotiate = ticket_subproto if used_ticket else WS_PROTOCOL_AUTH
+    await manager.connect_inbox(websocket, org_id, user_id, subprotocol=negotiate)
     
     try:
         while True:
