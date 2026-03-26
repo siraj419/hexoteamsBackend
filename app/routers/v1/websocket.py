@@ -1,4 +1,6 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
+"""WebSocket routes. Auth: Sec-WebSocket-Protocol with `hexoteams-auth` and base64url(UTF-8 JWT)."""
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.utils.uuid_compat import as_uuid
 import json
 import logging
@@ -10,6 +12,7 @@ from app.core.security import TOKEN_TYPE_ACCESS, decode_token
 from app.db.sync_session import SyncSessionLocal
 from app.models import ChatConversation, OrganizationMember, ProjectMember
 from app.utils.websocket_manager import manager
+from app.utils.ws_auth import WS_PROTOCOL_AUTH, get_access_token_from_websocket_protocol
 from app.services.chat import ChatService
 from app.schemas.chat import (
     ProjectMessageCreate,
@@ -81,7 +84,6 @@ async def verify_conversation_access(user_id: str, conversation_id: str) -> bool
 async def project_chat_websocket(
     websocket: WebSocket,
     project_id: str,
-    token: str = Query(None)
 ):
     """
     WebSocket endpoint for project chat
@@ -97,28 +99,31 @@ async def project_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
+    token = get_access_token_from_websocket_protocol(websocket)
     if not token:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
         await websocket.close(code=4001)
         return
-    
+
     user = await verify_ws_token(token)
     if not user:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
         await websocket.close(code=4001)
         return
-    
+
     user_id = user["id"]
-    
+
     if not await verify_project_access(user_id, project_id):
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Access denied"}))
         await websocket.close(code=4003)
         return
-    
-    await manager.connect_project(websocket, project_id, user_id)
+
+    await manager.connect_project(
+        websocket, project_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+    )
     
     try:
         while True:
@@ -148,7 +153,6 @@ async def project_chat_websocket(
 async def dm_chat_websocket(
     websocket: WebSocket,
     conversation_id: str,
-    token: str = Query(None)
 ):
     """
     WebSocket endpoint for direct message chat
@@ -164,28 +168,31 @@ async def dm_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
+    token = get_access_token_from_websocket_protocol(websocket)
     if not token:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
         await websocket.close(code=4001)
         return
-    
+
     user = await verify_ws_token(token)
     if not user:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
         await websocket.close(code=4001)
         return
-    
+
     user_id = user["id"]
-    
+
     if not await verify_conversation_access(user_id, conversation_id):
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Access denied"}))
         await websocket.close(code=4003)
         return
-    
-    await manager.connect_dm(websocket, conversation_id, user_id)
+
+    await manager.connect_dm(
+        websocket, conversation_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+    )
     
     try:
         while True:
@@ -423,7 +430,6 @@ async def handle_dm_event(conversation_id: str, user_id: str, event: dict, webso
 async def inbox_websocket(
     websocket: WebSocket,
     org_id: str,
-    token: str = Query(None)
 ):
     """
     WebSocket endpoint for real-time inbox notifications
@@ -436,21 +442,22 @@ async def inbox_websocket(
     - {"type": "unread_count", "count": 5}
     - {"type": "error", "message": "..."}
     """
+    token = get_access_token_from_websocket_protocol(websocket)
     if not token:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
         await websocket.close(code=4001)
         return
-    
+
     user = await verify_ws_token(token)
     if not user:
         await websocket.accept()
         await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
         await websocket.close(code=4001)
         return
-    
+
     user_id = user["id"]
-    
+
     try:
         from uuid import UUID
 
@@ -478,8 +485,10 @@ async def inbox_websocket(
         await websocket.send_text(json.dumps({"type": "error", "message": "Verification failed"}))
         await websocket.close(code=4003)
         return
-    
-    await manager.connect_inbox(websocket, org_id, user_id)
+
+    await manager.connect_inbox(
+        websocket, org_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+    )
     
     try:
         while True:

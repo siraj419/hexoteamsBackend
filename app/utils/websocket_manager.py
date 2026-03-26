@@ -236,9 +236,16 @@ class ConnectionManager:
         
         return local_conn_ids
     
-    async def connect_project(self, websocket: WebSocket, project_id: str, user_id: str):
+    async def connect_project(
+        self,
+        websocket: WebSocket,
+        project_id: str,
+        user_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
         """Connect a user to a project chat"""
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         
         connection_id = self._generate_connection_id()
         
@@ -256,9 +263,16 @@ class ConnectionManager:
         
         logger.info(f"User {user_id} connected to project {project_id} (connection: {connection_id})")
     
-    async def connect_dm(self, websocket: WebSocket, conversation_id: str, user_id: str):
+    async def connect_dm(
+        self,
+        websocket: WebSocket,
+        conversation_id: str,
+        user_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
         """Connect a user to a direct message conversation"""
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         
         conversation_id = str(conversation_id).lower().strip()
         connection_id = self._generate_connection_id()
@@ -579,9 +593,16 @@ class ConnectionManager:
             if metadata:
                 self._remove_connection_metadata(connection_id, metadata)
     
-    async def connect_inbox(self, websocket: WebSocket, org_id: str, user_id: str):
+    async def connect_inbox(
+        self,
+        websocket: WebSocket,
+        org_id: str,
+        user_id: str,
+        *,
+        subprotocol: str | None = None,
+    ):
         """Connect a user to inbox notifications"""
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         
         connection_id = self._generate_connection_id()
         
