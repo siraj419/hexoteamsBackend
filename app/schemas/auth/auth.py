@@ -92,8 +92,12 @@ class AuthTokenResponse(BaseModel):
 
 class AuthLoginResponse(AuthTokenResponse):
     pass
-class AuthConfirmResponse(AuthTokenResponse):
-    pass
+
+
+class AuthConfirmResponse(BaseModel):
+    """Email verification succeeded; client must sign in (no tokens or session cookies)."""
+    message: str
+
 
 class AuthRefreshTokenResponse(AuthTokenResponse):
     pass

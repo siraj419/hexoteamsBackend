@@ -42,12 +42,12 @@ def register(auth_request: AuthRegisterRequest):
     return auth_service.register(auth_request)
 
 @router.post("/confirm", response_model=AuthConfirmResponse, status_code=status.HTTP_200_OK)
-def confirm(auth_request: AuthConfirmRequest, response: Response):
-    """"
-        Confirm the user's email and set the session
+def confirm(auth_request: AuthConfirmRequest):
+    """
+    Confirm the user's email (marks verified). Client must sign in; no session is created here.
     """
     auth_service = AuthService()
-    return auth_service.confirm(auth_request, response)
+    return auth_service.confirm(auth_request)
 
 @router.post("/refresh", response_model=AuthRefreshTokenResponse, status_code=status.HTTP_200_OK)
 def refresh(request: Request, response: Response):

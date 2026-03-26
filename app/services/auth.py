@@ -120,7 +120,7 @@ class AuthService:
             message="User registered successfully, check your email for verification"
         )
 
-    def confirm(self, auth_request: AuthConfirmRequest, response: Response) -> AuthConfirmResponse:
+    def confirm(self, auth_request: AuthConfirmRequest) -> AuthConfirmResponse:
         try:
             payload = decode_token(auth_request.access_token, expected_type=TOKEN_TYPE_EMAIL_VERIFY)
         except ValueError:
@@ -131,8 +131,6 @@ class AuthService:
 
         user_id = UUID(payload["sub"])
         db = SyncSessionLocal()
-        access_token = ""
-        expires_in = 0
         try:
             profile = db.execute(
                 select(Profile).where(Profile.user_id == user_id)
@@ -145,14 +143,11 @@ class AuthService:
             profile.email_verified = True
             profile.updated_at = datetime.now(timezone.utc)
             db.commit()
-
-            access_token, expires_in = _issue_session(response, profile.user_id, profile.email)
         finally:
             db.close()
 
         return AuthConfirmResponse(
-            access_token=access_token,
-            expires_in=expires_in,
+            message="Email verified successfully. You can sign in now.",
         )
 
     def refresh(self, request: Request, response: Response) -> AuthRefreshTokenResponse:
