@@ -1,19 +1,29 @@
-"""WebSocket routes. Auth: Sec-WebSocket-Protocol with `hexoteams-auth` and base64url(UTF-8 JWT)."""
+"""WebSocket routes.
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.utils.uuid_compat import as_uuid
+Auth (choose one):
+- Query `?ticket=<short-lived ticket>` from POST /api/v1/ws/ticket (Brave-friendly).
+- Or Sec-WebSocket-Protocol `hexoteams-auth` with base64url(UTF-8 JWT) (legacy).
+"""
+
+from __future__ import annotations
+
 import json
 import logging
-from datetime import datetime, timezone
+from typing import Any, Literal
 
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 
-from app.core.security import TOKEN_TYPE_ACCESS, decode_token
+from app.core.security import TOKEN_TYPE_ACCESS, AuthenticatedUser, decode_token
 from app.db.sync_session import SyncSessionLocal
 from app.models import ChatConversation, OrganizationMember, ProjectMember
+from app.routers.deps import get_current_user
+from app.services.chat import ChatService
+from app.utils.uuid_compat import as_uuid
 from app.utils.websocket_manager import manager
 from app.utils.ws_auth import WS_PROTOCOL_AUTH, get_access_token_from_websocket_protocol
-from app.services.chat import ChatService
+from app.utils.ws_ticket_store import consume_ws_ticket, issue_ws_ticket
 from app.schemas.chat import (
     ProjectMessageCreate,
     DirectMessageCreate,
@@ -21,6 +31,12 @@ from app.schemas.chat import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+WS_POLICY_VIOLATION = 1008
+
+
+class WebSocketTicketResponse(BaseModel):
+    ticket: str
 
 
 async def verify_ws_token(token: str) -> dict | None:
@@ -80,6 +96,29 @@ async def verify_conversation_access(user_id: str, conversation_id: str) -> bool
         return False
 
 
+@router.post("/ticket", response_model=WebSocketTicketResponse)
+async def create_websocket_ticket(user: AuthenticatedUser = Depends(get_current_user)):
+    ticket = await issue_ws_ticket(user.id)
+    return WebSocketTicketResponse(ticket=ticket)
+
+
+async def _user_from_ticket_or_protocol(
+    websocket: WebSocket,
+) -> tuple[dict[str, Any] | None, Literal["invalid_ticket"] | None, bool]:
+    """
+    Returns (user dict, invalid_ticket marker, used_ticket_auth).
+    If invalid_ticket is set, close with 1008 and return.
+    If user is None and not invalid_ticket, JWT path should be tried.
+    """
+    raw_ticket = websocket.query_params.get("ticket")
+    if raw_ticket is not None and raw_ticket.strip():
+        user_id = await consume_ws_ticket(raw_ticket)
+        if not user_id:
+            return None, "invalid_ticket", True
+        return {"id": user_id, "email": ""}, None, True
+    return None, None, False
+
+
 @router.websocket("/project/{project_id}")
 async def project_chat_websocket(
     websocket: WebSocket,
@@ -99,19 +138,25 @@ async def project_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
-    token = get_access_token_from_websocket_protocol(websocket)
-    if not token:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
-        await websocket.close(code=4001)
+    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    if ticket_err:
+        await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
 
-    user = await verify_ws_token(token)
     if not user:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
-        await websocket.close(code=4001)
-        return
+        token = get_access_token_from_websocket_protocol(websocket)
+        if not token:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
+            await websocket.close(code=4001)
+            return
+
+        user = await verify_ws_token(token)
+        if not user:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
+            await websocket.close(code=4001)
+            return
 
     user_id = user["id"]
 
@@ -122,7 +167,7 @@ async def project_chat_websocket(
         return
 
     await manager.connect_project(
-        websocket, project_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+        websocket, project_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
     )
     
     try:
@@ -168,19 +213,25 @@ async def dm_chat_websocket(
     - {"type": "read", "user_id": "...", "message_id": "..."}
     - {"type": "error", "message": "..."}
     """
-    token = get_access_token_from_websocket_protocol(websocket)
-    if not token:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
-        await websocket.close(code=4001)
+    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    if ticket_err:
+        await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
 
-    user = await verify_ws_token(token)
     if not user:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
-        await websocket.close(code=4001)
-        return
+        token = get_access_token_from_websocket_protocol(websocket)
+        if not token:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
+            await websocket.close(code=4001)
+            return
+
+        user = await verify_ws_token(token)
+        if not user:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
+            await websocket.close(code=4001)
+            return
 
     user_id = user["id"]
 
@@ -191,7 +242,7 @@ async def dm_chat_websocket(
         return
 
     await manager.connect_dm(
-        websocket, conversation_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+        websocket, conversation_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
     )
     
     try:
@@ -442,19 +493,25 @@ async def inbox_websocket(
     - {"type": "unread_count", "count": 5}
     - {"type": "error", "message": "..."}
     """
-    token = get_access_token_from_websocket_protocol(websocket)
-    if not token:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
-        await websocket.close(code=4001)
+    user, ticket_err, used_ticket = await _user_from_ticket_or_protocol(websocket)
+    if ticket_err:
+        await websocket.close(code=WS_POLICY_VIOLATION, reason="Invalid or expired ticket")
         return
 
-    user = await verify_ws_token(token)
     if not user:
-        await websocket.accept()
-        await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
-        await websocket.close(code=4001)
-        return
+        token = get_access_token_from_websocket_protocol(websocket)
+        if not token:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Token required"}))
+            await websocket.close(code=4001)
+            return
+
+        user = await verify_ws_token(token)
+        if not user:
+            await websocket.accept()
+            await websocket.send_text(json.dumps({"type": "error", "message": "Invalid token"}))
+            await websocket.close(code=4001)
+            return
 
     user_id = user["id"]
 
@@ -487,7 +544,7 @@ async def inbox_websocket(
         return
 
     await manager.connect_inbox(
-        websocket, org_id, user_id, subprotocol=WS_PROTOCOL_AUTH
+        websocket, org_id, user_id, subprotocol=None if used_ticket else WS_PROTOCOL_AUTH
     )
     
     try:
