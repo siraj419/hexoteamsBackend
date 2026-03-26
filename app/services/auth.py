@@ -61,6 +61,7 @@ def _issue_session(response: Response, user_id: UUID, email: str) -> tuple[str, 
         value=refresh_token,
         httponly=True,
         secure=True,
+        samesite="none"
     )
     return access_token, expires_in
 
@@ -190,6 +191,7 @@ class AuthService:
             value=new_refresh,
             httponly=True,
             secure=True,
+            samesite="none"
         )
         return AuthRefreshTokenResponse(access_token=access_token, expires_in=expires_in)
 
