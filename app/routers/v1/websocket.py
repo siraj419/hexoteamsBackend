@@ -1,5 +1,5 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
-from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 import json
 import logging
 from datetime import datetime, timezone
@@ -225,8 +225,8 @@ async def handle_project_event(project_id: str, user_id: str, event: dict, webso
         )
         
         response = chat_service.send_project_message(
-            UUID4(project_id),
-            UUID4(user_id),
+            as_uuid(project_id),
+            as_uuid(user_id),
             message_data
         )
         
@@ -264,9 +264,9 @@ async def handle_project_event(project_id: str, user_id: str, event: dict, webso
             logger.info(f"[WS Read Receipt] Project chat - Processing read receipt - user_id: {user_id}, project_id: {project_id}, last_read_message_id: {message_id}")
             chat_service = ChatService()
             marked_message_ids = chat_service.mark_project_messages_read(
-                UUID4(project_id),
-                UUID4(user_id),
-                UUID4(message_id)
+                as_uuid(project_id),
+                as_uuid(user_id),
+                as_uuid(message_id)
             )
             logger.info(f"[WS Read Receipt] Project chat - Marked {len(marked_message_ids)} messages as read for user {user_id} in project {project_id}")
             
@@ -325,10 +325,10 @@ async def handle_dm_event(conversation_id: str, user_id: str, event: dict, webso
         organization_id = conv[0]
         
         response = chat_service.send_direct_message(
-            UUID4(conversation_id),
-            UUID4(user_id),
+            as_uuid(conversation_id),
+            as_uuid(user_id),
             message_data,
-            UUID4(organization_id)
+            as_uuid(organization_id)
         )
         
         await manager.broadcast_to_dm(
@@ -385,10 +385,10 @@ async def handle_dm_event(conversation_id: str, user_id: str, event: dict, webso
             
             chat_service = ChatService()
             marked_message_ids = chat_service.mark_dm_read(
-                UUID4(conversation_id),
-                UUID4(user_id),
-                UUID4(message_id),
-                UUID4(organization_id)
+                as_uuid(conversation_id),
+                as_uuid(user_id),
+                as_uuid(message_id),
+                as_uuid(organization_id)
             )
             logger.info(f"[WS Read Receipt] DM chat - Marked {len(marked_message_ids)} messages as read for user {user_id} in conversation {conversation_id}")
             

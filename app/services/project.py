@@ -7,6 +7,7 @@ from uuid import UUID as StdUUID
 
 from fastapi import HTTPException, UploadFile, status
 from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from app.db.rpc_compat import select_member_projects, select_non_member_projects
@@ -74,9 +75,9 @@ class ProjectService:
         project_id: UUID4,
     ) -> ProjectMember:
         return ProjectMember(
-            id=UUID4(str(m.id)),
+            id=as_uuid(str(m.id)),
             project_id=project_id,
-            user_id=UUID4(str(m.user_id)),
+            user_id=as_uuid(str(m.user_id)),
             role=ProjectMemberRole(m.role),
             created_at=m.created_at,
             updated_at=m.updated_at,
@@ -298,8 +299,8 @@ class ProjectService:
         finally:
             db.close()
 
-        project_id = UUID4(str(row.id))
-        self._add_project_member(project_id, UUID4(str(user_id)), ProjectMemberRole.OWNER)
+        project_id = as_uuid(str(row.id))
+        self._add_project_member(project_id, as_uuid(str(user_id)), ProjectMemberRole.OWNER)
 
         if project_request.avatar_file_id:
             self.files_service.update_file_project_id(
@@ -320,7 +321,7 @@ class ProjectService:
                 self.activity_service.add_activity(
                     ActivityType.PROJECT,
                     project_id,
-                    UUID4(str(user_id)),
+                    as_uuid(str(user_id)),
                     f"Project created by {user_display_name}",
                 )
             finally:
@@ -336,7 +337,7 @@ class ProjectService:
         return ProjectCreateResponse(
             id=project_id,
             name=row.name,
-            org_id=UUID4(str(row.org_id)),
+            org_id=as_uuid(str(row.org_id)),
             avatar_color=project_request.avatar_color,
             avatar_icon=project_request.avatar_icon,
             avatar_url=project_avatar_url,
@@ -345,7 +346,7 @@ class ProjectService:
             view=view,
             progress_percentage=int(row.progress_percentage or 0),
             members=members,
-            favourite_project=self._is_favourite_project(project_id, UUID4(str(user_id))),
+            favourite_project=self._is_favourite_project(project_id, as_uuid(str(user_id))),
         )
         
     def get_projects(
@@ -394,14 +395,14 @@ class ProjectService:
                 if project.avatar_file_id
                 else None
             )
-            project_id = UUID4(str(project.id))
+            project_id = as_uuid(str(project.id))
             members = self._get_project_members(project_id)
             view = self._parse_view(project.view)
             projects.append(
                 ProjectGetResponse(
                     id=project_id,
                     name=project.name,
-                    org_id=UUID4(str(project.org_id)),
+                    org_id=as_uuid(str(project.org_id)),
                     avatar_color=project.avatar_color,
                     avatar_icon=project.avatar_icon,
                     avatar_url=avatar_url,
@@ -460,14 +461,14 @@ class ProjectService:
                 if project.avatar_file_id
                 else None
             )
-            project_id = UUID4(str(project.id))
+            project_id = as_uuid(str(project.id))
             members = self._get_project_members(project_id)
             view = self._parse_view(project.view)
             projects.append(
                 ProjectGetResponse(
                     id=project_id,
                     name=project.name,
-                    org_id=UUID4(str(project.org_id)),
+                    org_id=as_uuid(str(project.org_id)),
                     avatar_color=project.avatar_color,
                     avatar_icon=project.avatar_icon,
                     avatar_url=avatar_url,
@@ -521,14 +522,14 @@ class ProjectService:
                 if project.avatar_file_id
                 else None
             )
-            project_id = UUID4(str(project.id))
+            project_id = as_uuid(str(project.id))
             members = self._get_project_members(project_id)
             view = self._parse_view(project.view)
             projects.append(
                 ProjectGetResponse(
                     id=project_id,
                     name=project.name,
-                    org_id=UUID4(str(project.org_id)),
+                    org_id=as_uuid(str(project.org_id)),
                     avatar_color=project.avatar_color,
                     avatar_icon=project.avatar_icon,
                     avatar_url=avatar_url,
@@ -575,9 +576,9 @@ class ProjectService:
         view = self._parse_view(row.view)
 
         return ProjectGetResponse(
-            id=UUID4(str(row.id)),
+            id=as_uuid(str(row.id)),
             name=row.name,
-            org_id=UUID4(str(row.org_id)),
+            org_id=as_uuid(str(row.org_id)),
             avatar_color=row.avatar_color,
             avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
@@ -622,9 +623,9 @@ class ProjectService:
                         )
                         view = self._parse_view(prow.view)
                         project_info = ProjectResponse(
-                            id=UUID4(str(prow.id)),
+                            id=as_uuid(str(prow.id)),
                             name=prow.name,
-                            org_id=UUID4(str(prow.org_id)),
+                            org_id=as_uuid(str(prow.org_id)),
                             avatar_color=prow.avatar_color,
                             avatar_icon=prow.avatar_icon,
                             avatar_url=avatar_url,
@@ -634,7 +635,7 @@ class ProjectService:
                             progress_percentage=int(prow.progress_percentage or 0),
                             members=cached_summary.get("members", []),
                             favourite_project=self._is_favourite_project(
-                                UUID4(str(prow.id)), user_id
+                                as_uuid(str(prow.id)), user_id
                             ),
                             archived=bool(prow.archived),
                         )
@@ -676,9 +677,9 @@ class ProjectService:
                 view = self._parse_view(project_data_row.view)
 
                 project_info = ProjectResponse(
-                    id=UUID4(str(project_data_row.id)),
+                    id=as_uuid(str(project_data_row.id)),
                     name=project_data_row.name,
-                    org_id=UUID4(str(project_data_row.org_id)),
+                    org_id=as_uuid(str(project_data_row.org_id)),
                     avatar_color=project_data_row.avatar_color,
                     avatar_icon=project_data_row.avatar_icon,
                     avatar_url=avatar_url,
@@ -725,7 +726,7 @@ class ProjectService:
             seen_user_ids = set()
             if member_rows:
                 user_role_map = {
-                    UUID4(str(uid)): role for uid, role in member_rows
+                    as_uuid(str(uid)): role for uid, role in member_rows
                 }
                 pm_user_ids = list(user_role_map.keys())
 
@@ -768,7 +769,7 @@ class ProjectService:
                         created_at = created_at.replace(tzinfo=timezone.utc)
                     latest_links.append(
                         ProjectLinkSummary(
-                            id=UUID4(str(lk.id)),
+                            id=as_uuid(str(lk.id)),
                             title=lk.title,
                             link_url=str(lk.link_url or ""),
                             created_at=created_at,
@@ -822,10 +823,10 @@ class ProjectService:
 
             user_workloads = []
             if user_task_counts:
-                wl_uids = [UUID4(x) for x in user_task_counts.keys()]
+                wl_uids = [as_uuid(x) for x in user_task_counts.keys()]
                 user_info_cache = self._batch_get_user_info(wl_uids)
                 for assignee_key, task_count in user_task_counts.items():
-                    wl_uid = UUID4(assignee_key)
+                    wl_uid = as_uuid(assignee_key)
                     user_info = user_info_cache.get(assignee_key) or {
                         "id": assignee_key,
                         "display_name": None,
@@ -910,7 +911,7 @@ class ProjectService:
                 avatar_url = None
                 if cached_user.get('avatar_file_id'):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(as_uuid(cached_user['avatar_file_id']))
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
@@ -938,7 +939,7 @@ class ProjectService:
                 avatar_url = None
                 if avatar_file_id:
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
+                        avatar_url = self.files_service.get_file_url(as_uuid(str(avatar_file_id)))
                     except Exception as e:
                         logger.warning(
                             "Failed to get avatar URL for user %s: %s", user_id_str, e
@@ -995,7 +996,7 @@ class ProjectService:
                     avatar_url = None
                     if cached_user.get('avatar_file_id'):
                         try:
-                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                            avatar_url = self.files_service.get_file_url(as_uuid(cached_user['avatar_file_id']))
                         except Exception as e:
                             logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                     
@@ -1033,7 +1034,7 @@ class ProjectService:
                     if avatar_file_id:
                         try:
                             avatar_url = self.files_service.get_file_url(
-                                UUID4(str(avatar_file_id))
+                                as_uuid(str(avatar_file_id))
                             )
                         except Exception as e:
                             logger.warning(
@@ -1122,7 +1123,7 @@ class ProjectService:
                 db.close()
 
             for uid, role in rows:
-                m_uid = UUID4(str(uid))
+                m_uid = as_uuid(str(uid))
                 user_info = self._get_user_info_with_cache(m_uid)
                 members.append(
                     ProjectMemberSummary(
@@ -1259,9 +1260,9 @@ class ProjectService:
             else None
         )
         return ProjectUpdateResponse(
-            id=UUID4(str(row.id)),
+            id=as_uuid(str(row.id)),
             name=row.name,
-            org_id=UUID4(str(row.org_id)),
+            org_id=as_uuid(str(row.org_id)),
             avatar_color=row.avatar_color,
             avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
@@ -1332,14 +1333,14 @@ class ProjectService:
         avatar_url = None
         if row.avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(UUID4(str(row.avatar_file_id)))
+                avatar_url = self.files_service.get_file_url(as_uuid(str(row.avatar_file_id)))
             except HTTPException:
                 pass
 
         return ProjectUpdateResponse(
-            id=UUID4(str(row.id)),
+            id=as_uuid(str(row.id)),
             name=row.name,
-            org_id=UUID4(str(row.org_id)),
+            org_id=as_uuid(str(row.org_id)),
             avatar_color=row.avatar_color,
             avatar_icon=row.avatar_icon,
             avatar_url=avatar_url,
@@ -1563,7 +1564,7 @@ class ProjectService:
                 if org_id_val is not None:
                     trigger_project_member_added_notification(
                         user_id=user_id,
-                        org_id=UUID4(str(org_id_val)),
+                        org_id=as_uuid(str(org_id_val)),
                         project_id=project_id,
                         project_name=project_name,
                         added_by_id=added_by_id,
@@ -1786,14 +1787,14 @@ class ProjectService:
                 if project_data.avatar_file_id
                 else None
             )
-            project_id = UUID4(str(project_data.id))
+            project_id = as_uuid(str(project_data.id))
             members = self._get_project_members(project_id)
             view = self._parse_view(project_data.view)
             projects.append(
                 ProjectGetResponse(
                     id=project_id,
                     name=project_data.name,
-                    org_id=UUID4(str(project_data.org_id)),
+                    org_id=as_uuid(str(project_data.org_id)),
                     avatar_color=project_data.avatar_color,
                     avatar_icon=project_data.avatar_icon,
                     avatar_url=avatar_url,
@@ -1841,7 +1842,7 @@ class ProjectService:
             db.close()
 
         projects = [
-            RecentProjectResponse(id=UUID4(str(r.id)), name=r.name) for r in rows
+            RecentProjectResponse(id=as_uuid(str(r.id)), name=r.name) for r in rows
         ]
         return RecentProjectsResponse(projects=projects)
 

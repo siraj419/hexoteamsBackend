@@ -15,6 +15,7 @@ from app.schemas.inbox import (
     InboxDeleteRequest,
     InboxDeleteResponse,
 )
+from app.utils.uuid_compat import as_uuid
 from app.services.inbox import InboxService
 from app.routers.deps import get_current_user, get_active_organization
 
@@ -26,7 +27,7 @@ def get_unread_count(
     organization: Any = Depends(get_active_organization),
 ):
     inbox_service = InboxService()
-    count = inbox_service.get_unread_count(UUID4(organization['member_user_id']), UUID4(organization['id']))
+    count = inbox_service.get_unread_count(as_uuid(organization['member_user_id']), as_uuid(organization['id']))
     return {
         "unread_count": count
     }
@@ -43,8 +44,8 @@ def get_all_inbox(
 ):
     inbox_service = InboxService()
     return inbox_service.get_all_inbox(
-        user_id=UUID4(organization['member_user_id']),
-        org_id=UUID4(organization['id']),
+        user_id=as_uuid(organization['member_user_id']),
+        org_id=as_uuid(organization['id']),
         include_archived=include_archived,
         unread_only=unread_only,
         order_by=order_by,
@@ -64,8 +65,8 @@ def get_archived_inbox(
     """
     inbox_service = InboxService()
     return inbox_service.get_archived_inbox(
-        user_id=UUID4(organization['member_user_id']),
-        org_id=UUID4(organization['id']),
+        user_id=as_uuid(organization['member_user_id']),
+        org_id=as_uuid(organization['id']),
         limit=limit,
         offset=offset,
     )
@@ -77,7 +78,7 @@ def get_inbox(
     organization: Any = Depends(get_active_organization),
 ):
     inbox_service = InboxService()
-    return inbox_service.get_inbox(inbox_id, UUID4(organization['member_user_id']))
+    return inbox_service.get_inbox(inbox_id, as_uuid(organization['member_user_id']))
 
 
 @router.patch('/{inbox_id}/read', response_model=InboxMarkReadResponse, status_code=status.HTTP_200_OK)
@@ -86,7 +87,7 @@ def mark_inbox_read(
     organization: Any = Depends(get_active_organization),
 ):
     inbox_service = InboxService()
-    return inbox_service.mark_read(inbox_id, UUID4(organization['member_user_id']))
+    return inbox_service.mark_read(inbox_id, as_uuid(organization['member_user_id']))
 
 
 @router.patch('/{inbox_id}/archive', response_model=InboxArchiveResponse, status_code=status.HTTP_200_OK)
@@ -95,7 +96,7 @@ def archive_inbox(
     organization: Any = Depends(get_active_organization),
 ):
     inbox_service = InboxService()
-    return inbox_service.archive_inbox(inbox_id, UUID4(organization['member_user_id']))
+    return inbox_service.archive_inbox(inbox_id, as_uuid(organization['member_user_id']))
 
 
 @router.patch('/{inbox_id}/unarchive', response_model=InboxUnarchiveResponse, status_code=status.HTTP_200_OK)
@@ -107,7 +108,7 @@ def unarchive_inbox(
     Restore an archived inbox message
     """
     inbox_service = InboxService()
-    return inbox_service.unarchive_inbox(inbox_id, UUID4(organization['member_user_id']))
+    return inbox_service.unarchive_inbox(inbox_id, as_uuid(organization['member_user_id']))
 
 
 @router.delete('/{inbox_id}', response_model=InboxDeleteResponse, status_code=status.HTTP_200_OK)
@@ -116,5 +117,5 @@ def delete_inbox(
     organization: Any = Depends(get_active_organization),
 ):
     inbox_service = InboxService()
-    return inbox_service.delete_inbox(inbox_id, UUID4(organization['member_user_id']))
+    return inbox_service.delete_inbox(inbox_id, as_uuid(organization['member_user_id']))
 

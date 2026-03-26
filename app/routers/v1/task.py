@@ -24,6 +24,7 @@ from app.schemas.tasks import (
     ProjectTasksMinimalResponse,
     TaskDepthResponse,
 )
+from app.utils.uuid_compat import as_uuid
 from app.services.task import (
     TaskService,
     TaskCommentCreateResponse,
@@ -405,8 +406,8 @@ def get_my_tasks(
     """
     task_service = TaskService()
     return task_service.get_user_tasks(
-        user_id=UUID4(active_organization['member_user_id']),
-        org_id=UUID4(active_organization['id']),
+        user_id=as_uuid(active_organization['member_user_id']),
+        org_id=as_uuid(active_organization['id']),
         task_type=task_type,
         search=search,
         task_status=status,
@@ -526,8 +527,8 @@ def delete_task(
     """
     task_service = TaskService()
     task_service.delete_task(
-        task_id=UUID4(permission['task_id']),
-        user_id=UUID4(permission['user_id']),
+        task_id=as_uuid(permission['task_id']),
+        user_id=as_uuid(permission['user_id']),
         force_delete=permission.get('is_org_admin', False)
     )
     return None
@@ -562,7 +563,7 @@ def download_task_attachment(
     try:
         result = attachment_service.get_task_attachment_download_url(
             attachment_id=attachment_id,
-            user_id=UUID4(member['user_id'])
+            user_id=as_uuid(member['user_id'])
         )
         return AttachmentDownloadResponse(**result)
     except HTTPException:
@@ -603,7 +604,7 @@ def download_comment_attachment(
     try:
         result = attachment_service.get_comment_attachment_download_url(
             attachment_id=attachment_id,
-            user_id=UUID4(member['user_id'])
+            user_id=as_uuid(member['user_id'])
         )
         return AttachmentDownloadResponse(**result)
     except HTTPException:

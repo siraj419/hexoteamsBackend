@@ -30,6 +30,7 @@ from app.schemas.chat import (
     ProjectConversationListResponse,
     WorkspaceUser,
 )
+from app.utils.uuid_compat import as_uuid
 from app.services.chat import ChatService
 from app.services.files import FilesService
 from app.utils.websocket_manager import manager
@@ -56,7 +57,7 @@ async def send_project_message(
     chat_service = ChatService()
     response = chat_service.send_project_message(
         project_id,
-        UUID4(project_member['user_id']),
+        as_uuid(project_member['user_id']),
         message_data
     )
     
@@ -115,7 +116,7 @@ async def edit_project_message(
     chat_service = ChatService()
     updated_message = chat_service.edit_message(
         message_id,
-        UUID4(project_member['user_id']),
+        as_uuid(project_member['user_id']),
         message_data,
         is_project_message=True
     )
@@ -149,7 +150,7 @@ async def delete_project_message(
     chat_service = ChatService()
     chat_service.delete_message(
         message_id,
-        UUID4(project_member['user_id']),
+        as_uuid(project_member['user_id']),
         is_project_admin=project_member['is_admin'],
         is_project_message=True
     )
@@ -182,7 +183,7 @@ def send_project_typing_indicator(
     chat_service = ChatService()
     chat_service.send_typing_indicator(
         project_id,
-        UUID4(user.id),
+        user.id,
         typing_data.is_typing,
         chat_type='project'
     )
@@ -205,7 +206,7 @@ async def mark_project_messages_read(
     chat_service = ChatService()
     marked_message_ids = chat_service.mark_project_messages_read(
         project_id,
-        UUID4(project_member['user_id']),
+        as_uuid(project_member['user_id']),
         read_data.last_read_message_id
     )
     
@@ -246,7 +247,7 @@ def get_project_conversations(
     
     chat_service = ChatService()
     result = chat_service.get_project_conversations(
-        UUID4(organization['member_user_id']),
+        as_uuid(organization['member_user_id']),
         organization['id'],
         limit=limit,
         offset=offset
@@ -285,7 +286,7 @@ def get_dm_conversations(
     
     chat_service = ChatService()
     result = chat_service.get_dm_conversations(
-        UUID4(organization['member_user_id']),
+        as_uuid(organization['member_user_id']),
         organization['id'],
         limit=limit,
         offset=offset
@@ -308,7 +309,7 @@ def create_dm_conversation(
         
     chat_service = ChatService()
     return chat_service.create_dm_conversation(
-        UUID4(organization['member_user_id']),
+        as_uuid(organization['member_user_id']),
         conversation_data.receiver_id,
         organization['id']
     )
@@ -334,8 +335,8 @@ def get_dm_messages(
     chat_service = ChatService()
     result = chat_service.get_direct_messages(
         conversation_id,
-        UUID4(conversation_participant['user_id']),
-        UUID4(organization['id']),
+        as_uuid(conversation_participant['user_id']),
+        as_uuid(organization['id']),
         limit=limit,
         offset=offset,
         before_date=before_date,
@@ -362,9 +363,9 @@ async def send_direct_message(
     chat_service = ChatService()
     response = chat_service.send_direct_message(
         conversation_id,
-        UUID4(conversation_participant['user_id']),
+        as_uuid(conversation_participant['user_id']),
         message_data,
-        UUID4(organization['id'])
+        as_uuid(organization['id'])
     )
     
     await manager.broadcast_to_dm(
@@ -394,7 +395,7 @@ async def edit_direct_message(
     chat_service = ChatService()
     updated_message = chat_service.edit_message(
         message_id,
-        UUID4(conversation_participant['user_id']),
+        as_uuid(conversation_participant['user_id']),
         message_data,
         is_project_message=False
     )
@@ -427,7 +428,7 @@ async def delete_direct_message(
     chat_service = ChatService()
     chat_service.delete_message(
         message_id,
-        UUID4(user.id),
+        user.id,
         is_project_admin=False,
         is_project_message=False
     )
@@ -484,7 +485,7 @@ async def send_dm_typing_indicator(
     chat_service = ChatService()
     chat_service.send_typing_indicator(
         conversation_id,
-        UUID4(conversation_participant['user_id']),
+        as_uuid(conversation_participant['user_id']),
         typing_data.is_typing,
         chat_type='direct'
     )
@@ -520,9 +521,9 @@ async def mark_dm_messages_read(
     chat_service = ChatService()
     marked_message_ids = chat_service.mark_dm_read(
         conversation_id,
-        UUID4(user.id),
+        user.id,
         read_data.last_read_message_id,
-        UUID4(organization['id'])
+        as_uuid(organization['id'])
     )
     
     # Broadcast all messages that were marked as read
@@ -571,7 +572,7 @@ async def upload_chat_attachment(
             file_content,
             file.filename,
             file.content_type,
-            UUID4(organization['member_user_id']),
+            as_uuid(organization['member_user_id']),
             organization['id'],
             chat_type,
             reference_id
@@ -600,7 +601,7 @@ def get_chat_attachment_details(
     try:
         result = files_service.get_chat_attachment_details(
             attachment_id,
-            UUID4(organization['member_user_id'])
+            as_uuid(organization['member_user_id'])
         )
         return ChatAttachmentDetailsResponse(**result)
     except HTTPException:
@@ -628,7 +629,7 @@ def get_attachment_download_url(
     try:
         result = files_service.get_chat_attachment_download_url(
             attachment_id,
-            UUID4(orgnization['member_user_id'])
+            as_uuid(orgnization['member_user_id'])
         )
         return result
     except HTTPException:
@@ -656,7 +657,7 @@ def delete_chat_attachment(
     try:
         files_service.delete_chat_attachment(
             attachment_id,
-            UUID4(organization['member_user_id'])
+            as_uuid(organization['member_user_id'])
         )
         return None
     except HTTPException:
@@ -686,7 +687,7 @@ def search_messages(
     
     chat_service = ChatService()
     return chat_service.search_messages(
-        UUID4(organization['member_user_id']),
+        as_uuid(organization['member_user_id']),
         organization['id'],
         q,
         chat_type=chat_type,
@@ -707,6 +708,6 @@ def get_notification_summary(
     
     chat_service = ChatService()
     return chat_service.get_unread_summary(
-        UUID4(organization['member_user_id']),
+        as_uuid(organization['member_user_id']),
         organization['id']
     )

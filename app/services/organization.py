@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, UploadFile, status
 from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -272,8 +273,8 @@ class OrganizationService:
 
         avatar_file_id = org.avatar_file_id
         if avatar_file_id:
-            file_data = self.files_service.update_file(UUID4(str(avatar_file_id)), file)
-            file_id = UUID4(file_data["id"])
+            file_data = self.files_service.update_file(as_uuid(str(avatar_file_id)), file)
+            file_id = as_uuid(file_data["id"])
         else:
             file_data = self.files_service.upload_file(file, user_id, org_id=organization_id)
             file_id = file_data.id
@@ -347,7 +348,7 @@ class OrganizationService:
             avatar_file_id = org.avatar_file_id
             if avatar_file_id:
                 try:
-                    self.files_service.delete_file_permanently(UUID4(str(avatar_file_id)))
+                    self.files_service.delete_file_permanently(as_uuid(str(avatar_file_id)))
                 except HTTPException as e:
                     logger.warning(
                         "Failed to delete avatar file %s from S3: %s", avatar_file_id, e

@@ -1,6 +1,7 @@
 import asyncio
 from app.core.celery import celery_app
 from app.core.email import mailer
+from app.utils.uuid_compat import as_uuid
 
 @celery_app.task(name='app.tasks.tasks.send_email_task')
 def send_email_task(
@@ -45,7 +46,6 @@ def send_organization_invitation_notification(
 ):
     """Send organization invitation notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -53,10 +53,10 @@ def send_organization_invitation_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_organization_invitation(
-                user_id=UUID4(user_id),
-                org_id=UUID4(org_id),
+                user_id=as_uuid(user_id),
+                org_id=as_uuid(org_id),
                 org_name=org_name,
-                inviter_id=UUID4(inviter_id),
+                inviter_id=as_uuid(inviter_id),
                 inviter_name=inviter_name,
             )
         )
@@ -79,7 +79,6 @@ def send_task_assigned_notification(
 ):
     """Send task assigned notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -87,11 +86,11 @@ def send_task_assigned_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_task_assigned(
-                user_id=UUID4(user_id),
-                org_id=UUID4(org_id),
-                task_id=UUID4(task_id),
+                user_id=as_uuid(user_id),
+                org_id=as_uuid(org_id),
+                task_id=as_uuid(task_id),
                 task_title=task_title,
-                assigned_by_id=UUID4(assigned_by_id),
+                assigned_by_id=as_uuid(assigned_by_id),
                 assigned_by_name=assigned_by_name,
                 project_name=project_name,
             )
@@ -115,7 +114,6 @@ def send_task_unassigned_notification(
 ):
     """Send task unassigned notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -123,11 +121,11 @@ def send_task_unassigned_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_task_unassigned(
-                user_id=UUID4(user_id),
-                org_id=UUID4(org_id),
-                task_id=UUID4(task_id),
+                user_id=as_uuid(user_id),
+                org_id=as_uuid(org_id),
+                task_id=as_uuid(task_id),
                 task_title=task_title,
-                unassigned_by_id=UUID4(unassigned_by_id),
+                unassigned_by_id=as_uuid(unassigned_by_id),
                 unassigned_by_name=unassigned_by_name,
                 project_name=project_name,
             )
@@ -150,7 +148,6 @@ def send_direct_message_notification(
 ):
     """Send direct message notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -158,12 +155,12 @@ def send_direct_message_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_direct_message(
-                user_id=UUID4(user_id),
-                org_id=UUID4(org_id),
-                sender_id=UUID4(sender_id),
+                user_id=as_uuid(user_id),
+                org_id=as_uuid(org_id),
+                sender_id=as_uuid(sender_id),
                 sender_name=sender_name,
                 message_preview=message_preview,
-                conversation_id=UUID4(conversation_id),
+                conversation_id=as_uuid(conversation_id),
             )
         )
         loop.close()
@@ -185,7 +182,6 @@ def send_task_completed_notification(
 ):
     """Send task completed notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -193,11 +189,11 @@ def send_task_completed_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_task_completed(
-                project_id=UUID4(project_id),
-                org_id=UUID4(org_id),
-                task_id=UUID4(task_id),
+                project_id=as_uuid(project_id),
+                org_id=as_uuid(org_id),
+                task_id=as_uuid(task_id),
                 task_title=task_title,
-                completed_by_id=UUID4(completed_by_id),
+                completed_by_id=as_uuid(completed_by_id),
                 completed_by_name=completed_by_name,
                 project_name=project_name,
             )
@@ -220,7 +216,6 @@ def send_project_member_added_notification(
 ):
     """Send project member added notification via Celery."""
     try:
-        from pydantic import UUID4
         from app.services.notification import NotificationService
         
         notification_service = NotificationService()
@@ -228,11 +223,11 @@ def send_project_member_added_notification(
         asyncio.set_event_loop(loop)
         loop.run_until_complete(
             notification_service.notify_project_member_added(
-                user_id=UUID4(user_id),
-                org_id=UUID4(org_id),
-                project_id=UUID4(project_id),
+                user_id=as_uuid(user_id),
+                org_id=as_uuid(org_id),
+                project_id=as_uuid(project_id),
                 project_name=project_name,
-                added_by_id=UUID4(added_by_id),
+                added_by_id=as_uuid(added_by_id),
                 added_by_name=added_by_name,
             )
         )

@@ -16,6 +16,7 @@ from app.schemas.time_logs.time_logs import (
     TimeLogUpdateResponse,
     TimeLogStatus,
 )
+from app.utils.uuid_compat import as_uuid
 from app.services.time_log import TimeLogService
 from app.routers.deps import get_active_organization
 
@@ -34,7 +35,7 @@ def create_time_log(
     time_log_request: TimeLogCreateRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.create_time_log(time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.create_time_log(time_log_request, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.post(
@@ -48,7 +49,7 @@ def start_time_log(
     time_log_request: TimeLogStartRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.start_time_log(time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.start_time_log(time_log_request, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.post(
@@ -62,7 +63,7 @@ def stop_time_log(
     stop_request: TimeLogStopRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.stop_time_log(time_log_id, stop_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.stop_time_log(time_log_id, stop_request, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.get(
@@ -74,7 +75,7 @@ def stop_time_log(
 def get_active_time_log(
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.get_active_time_log(UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.get_active_time_log(as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.get(
@@ -94,8 +95,8 @@ def get_time_logs(
     organization: dict = Depends(get_active_organization),
 ):
     return time_log_service.get_time_logs(
-        organization_id=UUID4(organization['id']),
-        user_id=UUID4(organization['member_user_id']),
+        organization_id=as_uuid(organization['id']),
+        user_id=as_uuid(organization['member_user_id']),
         project_id=project_id,
         task_id=task_id,
         from_date=from_date,
@@ -116,7 +117,7 @@ def get_time_log(
     time_log_id: UUID4,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.get_time_log(time_log_id, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.get_time_log(time_log_id, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.put(
@@ -130,7 +131,7 @@ def update_time_log(
     time_log_request: TimeLogUpdateRequest,
     organization: dict = Depends(get_active_organization),
 ):
-    return time_log_service.update_time_log(time_log_id, time_log_request, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    return time_log_service.update_time_log(time_log_id, time_log_request, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 
 
 @router.delete(
@@ -143,5 +144,5 @@ def delete_time_log(
     time_log_id: UUID4,
     organization: dict = Depends(get_active_organization),
 ):
-    time_log_service.delete_time_log(time_log_id, UUID4(organization['member_user_id']), UUID4(organization['id']))
+    time_log_service.delete_time_log(time_log_id, as_uuid(organization['member_user_id']), as_uuid(organization['id']))
 

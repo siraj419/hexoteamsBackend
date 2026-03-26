@@ -7,6 +7,7 @@ from uuid import UUID as PyUUID
 
 from fastapi import HTTPException, UploadFile, status
 from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import and_, delete, func, select, update
 
 from app.core.s3 import S3ServiceException, s3_service
@@ -240,7 +241,7 @@ class FilesService:
         finally:
             db.close()
 
-        self._get_user_profile(UUID4(str(row.uploaded_by)))
+        self._get_user_profile(as_uuid(str(row.uploaded_by)))
 
         file_response = FileBaseResponse(
             id=row.id,
@@ -608,7 +609,7 @@ class FilesService:
             avatar_file_id = cached_user.get('avatar_file_id')
             if avatar_file_id:
                 try:
-                    avatar_url = self.get_file_url(UUID4(avatar_file_id))
+                    avatar_url = self.get_file_url(as_uuid(avatar_file_id))
                 except HTTPException:
                     pass
             
@@ -622,7 +623,7 @@ class FilesService:
             display_name = cached_user.get('display_name', '')
             
             return FileUploadedByUserGetResponse(
-                id=UUID4(user_id_value),
+                id=as_uuid(user_id_value),
                 display_name=display_name,
                 avatar_url=avatar_url,
             )

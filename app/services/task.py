@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status, UploadFile
 from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import and_, delete, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from typing import Optional, List, Callable, Dict, Any, Tuple
@@ -543,8 +544,8 @@ class TaskService:
                 
                 if org_id and str(new_assignee_id) != str(user_id):
                     trigger_task_assigned_notification(
-                        user_id=UUID4(new_assignee_id),
-                        org_id=UUID4(org_id),
+                        user_id=as_uuid(new_assignee_id),
+                        org_id=as_uuid(org_id),
                         task_id=task_id,
                         task_title=task_title,
                         assigned_by_id=user_id,
@@ -558,8 +559,8 @@ class TaskService:
                 
                 if org_id and str(old_assignee_id) != str(user_id):
                     trigger_task_unassigned_notification(
-                        user_id=UUID4(old_assignee_id),
-                        org_id=UUID4(org_id),
+                        user_id=as_uuid(old_assignee_id),
+                        org_id=as_uuid(org_id),
                         task_id=task_id,
                         task_title=task_title,
                         unassigned_by_id=user_id,
@@ -575,8 +576,8 @@ class TaskService:
                 if org_id:
                     if str(old_assignee_id) != str(user_id):
                         trigger_task_unassigned_notification(
-                            user_id=UUID4(old_assignee_id),
-                            org_id=UUID4(org_id),
+                            user_id=as_uuid(old_assignee_id),
+                            org_id=as_uuid(org_id),
                             task_id=task_id,
                             task_title=task_title,
                             unassigned_by_id=user_id,
@@ -586,8 +587,8 @@ class TaskService:
                     
                     if str(new_assignee_id) != str(user_id):
                         trigger_task_assigned_notification(
-                            user_id=UUID4(new_assignee_id),
-                            org_id=UUID4(org_id),
+                            user_id=as_uuid(new_assignee_id),
+                            org_id=as_uuid(org_id),
                             task_id=task_id,
                             task_title=task_title,
                             assigned_by_id=user_id,
@@ -721,7 +722,7 @@ class TaskService:
                 try:
                     from app.services.project import ProjectService
                     project_service = ProjectService()
-                    project_service.update_project_progress(UUID4(pid))
+                    project_service.update_project_progress(as_uuid(pid))
                 except Exception as e:
                     logger.error(f"Failed to update project progress: {e}", exc_info=True)
 
@@ -803,8 +804,8 @@ class TaskService:
 
                     if org_id and project_id:
                         trigger_task_completed_notification(
-                            project_id=UUID4(project_id),
-                            org_id=UUID4(org_id),
+                            project_id=as_uuid(project_id),
+                            org_id=as_uuid(org_id),
                             task_id=task_id,
                             task_title=task_title,
                             completed_by_id=user_id,
@@ -821,7 +822,7 @@ class TaskService:
                 try:
                     from app.services.project import ProjectService
                     project_service = ProjectService()
-                    project_service.update_project_progress(UUID4(task_row.project_id))
+                    project_service.update_project_progress(as_uuid(task_row.project_id))
                 except Exception as e:
                     logger.error(f"Failed to update project progress: {e}", exc_info=True)
 
@@ -961,7 +962,7 @@ class TaskService:
             try:
                 from app.services.project import ProjectService
                 project_service = ProjectService()
-                project_service.update_project_progress(UUID4(project_id))
+                project_service.update_project_progress(as_uuid(project_id))
             except Exception as e:
                 logger.error(f"Failed to update project progress: {e}", exc_info=True)
         
@@ -1025,7 +1026,7 @@ class TaskService:
         all_assignee_ids = {r.assignee_id for r in rows if r.assignee_id}
         assignee_cache = {}
         if all_assignee_ids:
-            assignee_cache = self._batch_get_user_info([UUID4(str(uid)) for uid in all_assignee_ids])
+            assignee_cache = self._batch_get_user_info([as_uuid(str(uid)) for uid in all_assignee_ids])
 
         subtasks = [
             TaskResponse(
@@ -1126,17 +1127,17 @@ class TaskService:
         assignee_cache = {}
         if all_assignee_ids:
             assignee_cache = self._batch_get_user_info(
-                [UUID4(str(x)) for x in all_assignee_ids]
+                [as_uuid(str(x)) for x in all_assignee_ids]
             )
         project_cache = {}
         if all_project_ids:
             project_cache = self._batch_get_project_info(
-                [UUID4(str(x)) for x in all_project_ids]
+                [as_uuid(str(x)) for x in all_project_ids]
             )
 
         tasks = [
             TaskResponse(
-                id=UUID4(str(t.id)),
+                id=as_uuid(str(t.id)),
                 title=t.title,
                 content=t.content,
                 status=self._coerce_task_status(t.status),
@@ -1192,12 +1193,12 @@ class TaskService:
 
         attachments = []
         for att in rows:
-            file_data = self.files_service.get_file_with_url(UUID4(str(att.file_id)))
+            file_data = self.files_service.get_file_with_url(as_uuid(str(att.file_id)))
             ts = att.created_at
             attachments.append(
                 TaskGetAttachmentResponse(
-                    id=UUID4(str(att.id)),
-                    file_id=UUID4(str(att.file_id)),
+                    id=as_uuid(str(att.id)),
+                    file_id=as_uuid(str(att.file_id)),
                     file_name=file_data["file"]["name"],
                     task_id=task_id,
                     created_at=ts,
@@ -1226,14 +1227,14 @@ class TaskService:
                 detail="Task attachment not found",
             )
 
-        file_data = self.files_service.get_file_with_url(UUID4(str(row.file_id)))
-        file_url = self.files_service.get_file_url(UUID4(str(row.file_id)))
+        file_data = self.files_service.get_file_with_url(as_uuid(str(row.file_id)))
+        file_url = self.files_service.get_file_url(as_uuid(str(row.file_id)))
         ts = row.created_at
         return TaskGetAttachmentWithUrlResponse(
-            id=UUID4(str(row.id)),
-            file_id=UUID4(str(row.file_id)),
+            id=as_uuid(str(row.id)),
+            file_id=as_uuid(str(row.file_id)),
             file_name=file_data["file"]["name"],
-            task_id=UUID4(str(row.entity_id)),
+            task_id=as_uuid(str(row.entity_id)),
             created_at=ts,
             updated_at=ts,
             file_url=file_url,
@@ -1299,17 +1300,17 @@ class TaskService:
             user_id_str = str(cb) if cb else ""
             user_info = user_info_cache.get(user_id_str) if user_id_str else None
             if not user_info and cb:
-                user_info = self._get_user_info(UUID4(str(cb)))
+                user_info = self._get_user_info(as_uuid(str(cb)))
                 user_info_cache[user_id_str] = user_info
 
             subreplies = self._get_task_comment_replies(
-                UUID4(str(reply.id)), user_timezone, user_info_cache
+                as_uuid(str(reply.id)), user_timezone, user_info_cache
             )
             attachments = self._batch_get_attachments([rid])
 
             replies.append(
                 TaskGetCommentResponse(
-                    id=UUID4(str(reply.id)),
+                    id=as_uuid(str(reply.id)),
                     content=reply.content,
                     comment_by=user_info,
                     message_time=calculate_time_ago(reply.created_at, user_timezone),
@@ -1390,7 +1391,7 @@ class TaskService:
         all_comment_ids.extend(base_comment_ids)
 
         user_info_cache = self._batch_get_user_info(
-            [UUID4(uid) if isinstance(uid, str) else uid for uid in all_user_ids]
+            [as_uuid(uid) for uid in all_user_ids]
         )
         attachments_by_comment = self._batch_get_attachments(all_comment_ids)
 
@@ -1495,8 +1496,8 @@ class TaskService:
                 attachments_by_comment[comment_id] = []
             attachments_by_comment[comment_id].append(
                 AttachmentResponse(
-                    id=UUID4(str(attachment.id)),
-                    file_id=UUID4(str(attachment.file_id)),
+                    id=as_uuid(str(attachment.id)),
+                    file_id=as_uuid(str(attachment.file_id)),
                     file_name=fname or "",
                     file_size=calculate_file_size(fsize or 0),
                     content_type=fctype or "",
@@ -1574,13 +1575,13 @@ class TaskService:
 
         return [
             TaskBaseResponse(
-                id=UUID4(str(t.id)),
+                id=as_uuid(str(t.id)),
                 title=t.title,
                 content=t.content,
                 status=self._coerce_task_status(t.status),
                 due_date=t.due_date,
-                assignee_id=UUID4(str(t.assignee_id)) if t.assignee_id else None,
-                project_id=UUID4(str(t.project_id)),
+                assignee_id=as_uuid(str(t.assignee_id)) if t.assignee_id else None,
+                project_id=as_uuid(str(t.project_id)),
             )
             for t in rows
         ]
@@ -1617,12 +1618,12 @@ class TaskService:
         avatar_url = None
         if avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
+                avatar_url = self.files_service.get_file_url(as_uuid(str(avatar_file_id)))
             except Exception:
                 pass
 
         return TaskUserInfoResponse(
-            id=UUID4(str(p_uid)),
+            id=as_uuid(str(p_uid)),
             display_name=display_name,
             avatar_url=avatar_url,
         )
@@ -1662,11 +1663,11 @@ class TaskService:
             avatar_url = None
             if avatar_file_id:
                 try:
-                    avatar_url = self.files_service.get_file_url(UUID4(str(avatar_file_id)))
+                    avatar_url = self.files_service.get_file_url(as_uuid(str(avatar_file_id)))
                 except Exception:
                     pass
             user_info_dict[str(p_uid)] = TaskUserInfoResponse(
-                id=UUID4(str(p_uid)),
+                id=as_uuid(str(p_uid)),
                 display_name=display_name,
                 avatar_url=avatar_url,
             )
@@ -1698,7 +1699,7 @@ class TaskService:
             if cached:
                 try:
                     # Convert id string to UUID4 for TaskProjectInfo
-                    cached['id'] = UUID4(cached['id'])
+                    cached['id'] = as_uuid(cached['id'])
                     project_info_dict[project_id_str] = TaskProjectInfo(**cached)
                 except Exception as e:
                     logger.warning(f"Error parsing cached project data: {e}")
@@ -1736,12 +1737,12 @@ class TaskService:
                 avatar_url = None
                 if avf:
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(str(avf)))
+                        avatar_url = self.files_service.get_file_url(as_uuid(str(avf)))
                     except Exception:
                         pass
 
                 project_info = TaskProjectInfo(
-                    id=UUID4(str(pid)),
+                    id=as_uuid(str(pid)),
                     name=name,
                     avatar_color=avc,
                     avatar_icon=avi,
@@ -1825,7 +1826,7 @@ class TaskService:
 
         if not pid:
             return None
-        return UUID4(str(pid))
+        return as_uuid(str(pid))
     
     def get_task_depth_info(
         self,

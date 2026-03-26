@@ -14,6 +14,7 @@ from app.schemas.organizations import (
     OrganizationCreateResponse,
     OrganizationGetPaginatedResponse,
 )
+from app.utils.uuid_compat import as_uuid
 from app.services.organization import OrganizationService
 from app.routers.deps import get_organization_member, get_organization_owner, get_organization_admin_or_owner, get_current_user
 
@@ -105,7 +106,7 @@ def change_organization_avatar(
         Change the avatar of a specific organization for the organization admin or owner
     """
     organization_service = OrganizationService()
-    return organization_service.change_organization_avatar(organization_id, UUID4(admin_or_owner['member_user_id']), file)
+    return organization_service.change_organization_avatar(organization_id, as_uuid(admin_or_owner['member_user_id']), file)
 
 @router.delete("/{organization_id}/avatar", status_code=status.HTTP_204_NO_CONTENT)
 def delete_organization_avatar(

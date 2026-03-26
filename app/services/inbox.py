@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from pydantic import UUID4
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import delete, func, select, update
 
 from app.db.sync_session import SyncSessionLocal
@@ -494,7 +495,7 @@ class InboxService:
         try:
             cache_service.delete(f"inbox:{inbox_id}")
             if org_id:
-                self._invalidate_user_inbox_cache(user_id, UUID4(org_id))
+                self._invalidate_user_inbox_cache(user_id, as_uuid(org_id))
         except Exception as e:
             logger.warning("Redis delete error: %s", e)
 

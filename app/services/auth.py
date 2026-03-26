@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, Request, Response, UploadFile, status
 from pydantic import UUID4, EmailStr
+from app.utils.uuid_compat import as_uuid
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -328,7 +329,7 @@ class AuthService:
 
         UserMeCache.delete_user(str(user.id))
         if "timezone" in update_data:
-            TimeLogService().invalidate_user_timezone_caches(UUID4(str(user.id)))
+            TimeLogService().invalidate_user_timezone_caches(as_uuid(str(user.id)))
 
         return AuthUpdateProfileResponse(message="Profile updated successfully")
 
@@ -358,8 +359,8 @@ class AuthService:
             avatar_file_id = profile.avatar_file_id
             if avatar_file_id:
                 try:
-                    file_data = self.files_service.update_file(UUID4(str(avatar_file_id)), file)
-                    file_id = UUID4(file_data["id"])
+                    file_data = self.files_service.update_file(as_uuid(str(avatar_file_id)), file)
+                    file_id = as_uuid(file_data["id"])
                 except Exception as e:
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -367,7 +368,7 @@ class AuthService:
                     )
             else:
                 try:
-                    file_data = self.files_service.upload_file(file, UUID4(str(user.id)))
+                    file_data = self.files_service.upload_file(file, as_uuid(str(user.id)))
                     file_id = file_data.id
                 except Exception as e:
                     raise HTTPException(
@@ -409,7 +410,7 @@ class AuthService:
             db.close()
 
         try:
-            self.files_service.delete_file_permanently(UUID4(str(avatar_file_id)))
+            self.files_service.delete_file_permanently(as_uuid(str(avatar_file_id)))
         except Exception:
             pass
 

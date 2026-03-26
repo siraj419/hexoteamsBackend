@@ -2,6 +2,8 @@ import json
 from fastapi import HTTPException, status
 from pydantic import UUID4
 from typing import List, Optional, Dict, Any
+
+from app.utils.uuid_compat import as_uuid
 from datetime import datetime, timezone, timedelta
 import logging
 
@@ -74,7 +76,7 @@ class ChatService:
                 avatar_url = None
                 if cached_user.get('avatar_file_id'):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(as_uuid(cached_user['avatar_file_id']))
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
@@ -87,7 +89,7 @@ class ChatService:
             # Cache miss - fetch from database
             db = SyncSessionLocal()
             try:
-                p = db.execute(select(Profile).where(Profile.user_id == UUID4(user_id_str))).scalar_one_or_none()
+                p = db.execute(select(Profile).where(Profile.user_id == as_uuid(user_id_str))).scalar_one_or_none()
             finally:
                 db.close()
 
@@ -103,7 +105,7 @@ class ChatService:
                 avatar_url = None
                 if user.get("avatar_file_id"):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(user["avatar_file_id"]))
+                        avatar_url = self.files_service.get_file_url(as_uuid(user["avatar_file_id"]))
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                 
@@ -168,7 +170,7 @@ class ChatService:
                     avatar_url = None
                     if cached_user.get('avatar_file_id'):
                         try:
-                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                            avatar_url = self.files_service.get_file_url(as_uuid(cached_user['avatar_file_id']))
                         except Exception as e:
                             logger.warning(f"Failed to get avatar URL for user {user_id_str}: {e}")
                     
@@ -186,7 +188,7 @@ class ChatService:
         # Batch fetch missing users from database
         if user_ids_to_fetch:
             try:
-                uuids = [UUID4(x) for x in user_ids_to_fetch]
+                uuids = [as_uuid(x) for x in user_ids_to_fetch]
                 db = SyncSessionLocal()
                 try:
                     profiles = db.execute(select(Profile).where(Profile.user_id.in_(uuids))).scalars().all()
@@ -406,7 +408,7 @@ class ChatService:
                 # Collect user_id for batch fetching
                 if message.get('user_id'):
                     try:
-                        user_ids.add(UUID4(message['user_id']))
+                        user_ids.add(as_uuid(message['user_id']))
                     except Exception:
                         pass
             
@@ -534,7 +536,7 @@ class ChatService:
                     updated_message["read_by"] = self._normalize_read_by(
                         updated_message.get("read_by", [])
                     )
-                    user_id_for_enrich = UUID4(updated_message[user_field])
+                    user_id_for_enrich = as_uuid(updated_message[user_field])
                 else:
                     updated_message = {
                         "id": str(msg.id),
@@ -549,7 +551,7 @@ class ChatService:
                         "attachments": msg.attachments,
                         "read_at": msg.read_at.isoformat() if msg.read_at else None,
                     }
-                    user_id_for_enrich = UUID4(updated_message[user_field])
+                    user_id_for_enrich = as_uuid(updated_message[user_field])
 
                 self._enrich_message_with_user_info(updated_message, user_id_for_enrich)
                 return updated_message
@@ -835,8 +837,8 @@ class ChatService:
             
             u1s = min(str(sender_id), str(receiver_id))
             u2s = max(str(sender_id), str(receiver_id))
-            u1 = UUID4(u1s)
-            u2 = UUID4(u2s)
+            u1 = as_uuid(u1s)
+            u2 = as_uuid(u2s)
 
             db = SyncSessionLocal()
             try:
@@ -981,7 +983,7 @@ class ChatService:
                     )
                     if ou:
                         try:
-                            user_ids.add(UUID4(ou))
+                            user_ids.add(as_uuid(ou))
                         except Exception:
                             pass
 
@@ -991,7 +993,7 @@ class ChatService:
 
                 unread_counts = {}
                 if conversation_ids:
-                    uuids = [UUID4(x) for x in conversation_ids]
+                    uuids = [as_uuid(x) for x in conversation_ids]
                     notif_rows = db.execute(
                         select(ChatNotification.reference_id, ChatNotification.unread_count).where(
                             ChatNotification.user_id == user_id,
@@ -1006,8 +1008,8 @@ class ChatService:
                 for d in conversations:
                     conv_id_str = d["id"]
                     try:
-                        u1 = UUID4(d["user1_id"])
-                        u2 = UUID4(d["user2_id"])
+                        u1 = as_uuid(d["user1_id"])
+                        u2 = as_uuid(d["user2_id"])
                         dm = db.execute(
                             select(DirectMessage)
                             .where(
@@ -1257,10 +1259,8 @@ class ChatService:
             try:
                 dm = DirectMessage(
                     sender_id=sender_id,
-                    receiver_id=UUID4(receiver_id) if isinstance(receiver_id, str) else receiver_id,
-                    organization_id=UUID4(conversation["organization_id"])
-                    if isinstance(conversation["organization_id"], str)
-                    else conversation["organization_id"],
+                    receiver_id=as_uuid(receiver_id),
+                    organization_id=as_uuid(conversation["organization_id"]),
                     body=message_data.body,
                     message_type=message_type.value,
                     attachments=att_list,
@@ -1306,8 +1306,8 @@ class ChatService:
                 message_preview = message_data.body[:100] if message_data.body else "Sent an attachment"
                 
                 trigger_direct_message_notification(
-                    user_id=UUID4(receiver_id),
-                    org_id=UUID4(conversation['organization_id']),
+                    user_id=as_uuid(receiver_id),
+                    org_id=as_uuid(conversation['organization_id']),
                     sender_id=sender_id,
                     sender_name=sender_name,
                     message_preview=message_preview,
@@ -1354,8 +1354,8 @@ class ChatService:
         """
         try:
             conversation = self._get_conversation(conversation_id, user_id, organization_id)
-            u1 = UUID4(conversation["user1_id"])
-            u2 = UUID4(conversation["user2_id"])
+            u1 = as_uuid(conversation["user1_id"])
+            u2 = as_uuid(conversation["user2_id"])
 
             db = SyncSessionLocal()
             try:
@@ -1411,12 +1411,12 @@ class ChatService:
             for message in messages:
                 if message.get('sender_id'):
                     try:
-                        user_ids.add(UUID4(message['sender_id']))
+                        user_ids.add(as_uuid(message['sender_id']))
                     except Exception:
                         pass
                 if message.get('receiver_id'):
                     try:
-                        user_ids.add(UUID4(message['receiver_id']))
+                        user_ids.add(as_uuid(message['receiver_id']))
                     except Exception:
                         pass
             
@@ -1494,7 +1494,7 @@ class ChatService:
                 if conversation["user1_id"] == str(user_id)
                 else conversation["user1_id"]
             )
-            other_uuid = UUID4(other_user_id)
+            other_uuid = as_uuid(other_user_id)
 
             db = SyncSessionLocal()
             try:
@@ -1730,8 +1730,8 @@ class ChatService:
             
             # Update all attachments to link them to the message
             # Only update attachments that are currently unlinked (message_id is null)
-            attachment_id_strings = [UUID4(str(a)) for a in attachment_ids]
-            mid = UUID4(str(message_id))
+            attachment_id_strings = [as_uuid(str(a)) for a in attachment_ids]
+            mid = as_uuid(str(message_id))
             db = SyncSessionLocal()
             try:
                 db.execute(
@@ -1844,9 +1844,8 @@ class ChatService:
             return
         
         # Convert to UUID4 if it's a string
-        if isinstance(user_id, str):
-            user_id = UUID4(user_id)
-        
+        user_id = as_uuid(user_id)
+
         message['user'] = self._get_user_info_with_cache(user_id)
     
     def _enrich_dm_with_user_info(self, message: Dict[str, Any], sender_id: Optional[UUID4] = None, receiver_id: Optional[str] = None) -> None:
@@ -1859,13 +1858,13 @@ class ChatService:
         
         # Get sender info
         if sender_id:
-            message['sender'] = self._get_user_info_with_cache(UUID4(sender_id) if isinstance(sender_id, str) else sender_id)
+            message['sender'] = self._get_user_info_with_cache(as_uuid(sender_id))
         else:
             message['sender'] = None
         
         # Get receiver info
         if receiver_id:
-            message['receiver'] = self._get_user_info_with_cache(UUID4(receiver_id) if isinstance(receiver_id, str) else UUID4(receiver_id))
+            message['receiver'] = self._get_user_info_with_cache(as_uuid(receiver_id))
         else:
             message['receiver'] = None
     
@@ -1878,7 +1877,7 @@ class ChatService:
                 conversation['other_user'] = None
                 return
             
-            conversation['other_user'] = self._get_user_info_with_cache(UUID4(other_user_id))
+            conversation['other_user'] = self._get_user_info_with_cache(as_uuid(other_user_id))
             
         except Exception as e:
             logger.error(f"Error enriching conversation with user info: {str(e)}")
@@ -1899,7 +1898,7 @@ class ChatService:
                     select(ChatNotification.unread_count).where(
                         ChatNotification.user_id == user_id,
                         ChatNotification.chat_type == "direct",
-                        ChatNotification.reference_id == UUID4(str(conversation["id"])),
+                        ChatNotification.reference_id == as_uuid(str(conversation["id"])),
                     )
                 ).scalar_one_or_none()
             finally:
@@ -2068,7 +2067,7 @@ class ChatService:
             for msg in all_messages:
                 if msg.get("user_id"):
                     try:
-                        user_ids.add(UUID4(msg["user_id"]))
+                        user_ids.add(as_uuid(msg["user_id"]))
                     except Exception:
                         pass
 
@@ -2161,12 +2160,12 @@ class ChatService:
             for msg in messages:
                 if msg.get('sender_id'):
                     try:
-                        user_ids.add(UUID4(msg['sender_id']))
+                        user_ids.add(as_uuid(msg['sender_id']))
                     except Exception:
                         pass
                 if msg.get('receiver_id'):
                     try:
-                        user_ids.add(UUID4(msg['receiver_id']))
+                        user_ids.add(as_uuid(msg['receiver_id']))
                     except Exception:
                         pass
             
@@ -2229,12 +2228,12 @@ class ChatService:
             try:
                 if chat_type == "project":
                     name = db.execute(
-                        select(Project.name).where(Project.id == UUID4(str(reference_id)))
+                        select(Project.name).where(Project.id == as_uuid(str(reference_id)))
                     ).scalar_one_or_none()
                     return name or "Unknown Project"
                 conv = db.execute(
                     select(ChatConversation.user2_id).where(
-                        ChatConversation.id == UUID4(str(reference_id))
+                        ChatConversation.id == as_uuid(str(reference_id))
                     )
                 ).scalar_one_or_none()
             finally:

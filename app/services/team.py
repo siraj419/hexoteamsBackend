@@ -2,7 +2,9 @@ import secrets
 import uuid
 from uuid import UUID
 from fastapi import HTTPException, status
-from pydantic import UUID4, EmailStr
+from pydantic import UUID4
+
+from app.utils.uuid_compat import as_uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
@@ -118,7 +120,7 @@ class TeamService:
                             return
                         # Case 1: User already belongs to organization
                         self._add_user_to_projects(
-                            UUID4(existing_user["id"]),
+                            as_uuid(existing_user["id"]),
                             invite_request.add_as_admin,
                             invite_request.project_ids,
                             inviter_id=invited_by,
@@ -190,7 +192,7 @@ class TeamService:
             
             # Mark invitation as accepted IMMEDIATELY to prevent concurrent processing
             # This must happen before adding user to org/projects to prevent race conditions
-            invitation_id = UUID4(invitation['id'])
+            invitation_id = as_uuid(invitation['id'])
             try:
                 db = SyncSessionLocal()
                 try:
@@ -231,9 +233,9 @@ class TeamService:
                 )
             
             # Add user to organization and projects
-            org_id = UUID4(invitation['org_id'])
-            project_ids = [UUID4(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else []
-            inviter_id = UUID4(invitation['invited_by']) if invitation.get('invited_by') else None
+            org_id = as_uuid(invitation['org_id'])
+            project_ids = [as_uuid(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else []
+            inviter_id = as_uuid(invitation['invited_by']) if invitation.get('invited_by') else None
             self._add_user_to_organization_and_projects(
                 user_id,
                 org_id,
@@ -263,8 +265,8 @@ class TeamService:
             return TeamInvitationAcceptResponse(
                 success=False,
                 message="Please sign in or register to accept the invitation",
-                organization_id=UUID4(invitation['org_id']),
-                project_ids=[UUID4(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else [],
+                organization_id=as_uuid(invitation['org_id']),
+                project_ids=[as_uuid(pid) for pid in invitation.get('added_project_ids', [])] if invitation.get('added_project_ids') else [],
             )
     
     def get_team_invitations(
@@ -355,7 +357,7 @@ class TeamService:
         
         inviters_cache = {}
         if inviter_ids:
-            inviters_cache = self._batch_get_user_info([UUID4(uid) for uid in inviter_ids])
+            inviters_cache = self._batch_get_user_info([as_uuid(uid) for uid in inviter_ids])
         
         # Get project info for each invitation
         all_project_ids = set()
@@ -365,7 +367,7 @@ class TeamService:
         
         projects_cache = {}
         if all_project_ids:
-            projects_cache = self._batch_get_project_info([UUID4(pid) for pid in all_project_ids])
+            projects_cache = self._batch_get_project_info([as_uuid(pid) for pid in all_project_ids])
         
         invitations = []
         for inv in filtered_data:
@@ -391,7 +393,7 @@ class TeamService:
                     project_info = projects_cache.get(str(project_id))
                     if project_info:
                         invited_projects.append(TeamInvitationProjectResponse(
-                            id=UUID4(project_id),
+                            id=as_uuid(project_id),
                             name=project_info['name'],
                             avatar_color=project_info.get('avatar_color'),
                             avatar_icon=project_info.get('avatar_icon'),
@@ -403,14 +405,14 @@ class TeamService:
                 inviter = inviters_cache.get(str(inv['invited_by']))
                 if inviter:
                     invited_by_info = TeamInvitedByResponse(
-                        id=UUID4(inviter['id']),
+                        id=as_uuid(inviter['id']),
                         display_name=inviter['display_name'],
                         email=inviter['email'],
                         avatar_url=inviter.get('avatar_url'),
                     )
             
             invitations.append(TeamInvitationsResponse(
-                id=UUID4(inv['id']),
+                id=as_uuid(inv['id']),
                 status=status_str,
                 emails=inv['email'],
                 invited_projects=invited_projects if invited_projects else None,
@@ -441,7 +443,7 @@ class TeamService:
                 user_id_str = str(member_dict.get('id', ''))
                 if user_id_str:
                     try:
-                        user_info = self._get_user_info(UUID4(user_id_str))
+                        user_info = self._get_user_info(as_uuid(user_id_str))
                         member_dict['avatar_url'] = user_info.get('avatar_url')
                         logger.debug(f"Regenerated avatar URL for cached member {user_id_str}: {member_dict.get('avatar_url', 'None')[:50] if member_dict.get('avatar_url') else 'None'}...")
                     except Exception as e:
@@ -563,7 +565,7 @@ class TeamService:
         if not response_data:
             return {"members": [], "total": 0, "limit": limit, "offset": offset}
 
-        user_ids = [UUID4(member["user_id"]) for member in response_data]
+        user_ids = [as_uuid(member["user_id"]) for member in response_data]
         users_cache = self._batch_get_user_info(user_ids)
         
         # Build member list
@@ -582,7 +584,7 @@ class TeamService:
             user_info = users_cache.get(user_id_str)
             if not user_info:
                 try:
-                    user_info = self._get_user_info(UUID4(user_id_str))
+                    user_info = self._get_user_info(as_uuid(user_id_str))
                     if not user_info:
                         logger.warning(f"User {user_id_str} not found in profiles, skipping")
                         continue
@@ -909,7 +911,7 @@ class TeamService:
         if existing_user:
             try:
                 trigger_organization_invitation_notification(
-                    user_id=UUID4(existing_user['id']),
+                    user_id=as_uuid(existing_user['id']),
                     org_id=org_id,
                     org_name=org_info['name'],
                     inviter_id=invited_by,
@@ -1154,7 +1156,7 @@ class TeamService:
             avatar_file_id = cached_user.get('avatar_file_id')
             if avatar_file_id:
                 try:
-                    avatar_url = self.files_service.get_file_url(UUID4(avatar_file_id))
+                    avatar_url = self.files_service.get_file_url(as_uuid(avatar_file_id))
                     logger.debug(f"Generated avatar URL for user {user_id_str} from cache: {avatar_url[:50] if avatar_url else 'None'}...")
                 except Exception as e:
                     logger.warning(f"Failed to get avatar URL for user {user_id_str} from cache (file_id: {avatar_file_id}): {e}")
@@ -1206,7 +1208,7 @@ class TeamService:
         avatar_file_id = profile.get('avatar_file_id')
         if avatar_file_id:
             try:
-                avatar_url = self.files_service.get_file_url(UUID4(avatar_file_id))
+                avatar_url = self.files_service.get_file_url(as_uuid(avatar_file_id))
                 logger.debug(f"Generated avatar URL for user {user_id_str} from database: {avatar_url[:50] if avatar_url else 'None'}...")
             except Exception as e:
                 logger.warning(f"Failed to get avatar URL for user {user_id_str} from database (file_id: {avatar_file_id}): {e}")
@@ -1251,7 +1253,7 @@ class TeamService:
                     avatar_url = None
                     if cached_user.get('avatar_file_id'):
                         try:
-                            avatar_url = self.files_service.get_file_url(UUID4(cached_user['avatar_file_id']))
+                            avatar_url = self.files_service.get_file_url(as_uuid(cached_user['avatar_file_id']))
                         except Exception as e:
                             logger.warning(f"Failed to get avatar URL for user {user_id_str} from batch cache: {e}")
                             avatar_url = None
@@ -1309,7 +1311,7 @@ class TeamService:
                 avatar_url = None
                 if profile.get('avatar_file_id'):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(profile['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(as_uuid(profile['avatar_file_id']))
                         logger.debug(f"Generated avatar URL for user {user_id_str}: {avatar_url[:50] if avatar_url else 'None'}...")
                     except Exception as e:
                         logger.warning(f"Failed to get avatar URL for user {user_id_str} from batch database: {e}")
@@ -1402,7 +1404,7 @@ class TeamService:
                 avatar_url = None
                 if project.get('avatar_file_id'):
                     try:
-                        avatar_url = self.files_service.get_file_url(UUID4(project['avatar_file_id']))
+                        avatar_url = self.files_service.get_file_url(as_uuid(project['avatar_file_id']))
                     except Exception:
                         pass
                 

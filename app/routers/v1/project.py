@@ -30,6 +30,7 @@ from app.schemas.projects import (
 )
 from app.schemas.organizations import OrganizationMemberRole
 
+from app.utils.uuid_compat import as_uuid
 from app.services.project import ProjectService
 from app.services.attachment import AttachmentService
 from app.services.files import FilesService
@@ -393,7 +394,7 @@ def get_project(
     project_service = ProjectService()
     user_id = None
     if access.get('member_data'):
-        user_id = UUID4(access['member_data']['user_id'])
+        user_id = as_uuid(access['member_data']['user_id'])
     elif access.get('has_access'):
         # Try to get user from current_user dependency
         try:
@@ -435,7 +436,7 @@ def add_project_member(
         project_id=project_id,
         user_id=member_request.user_id,
         role=member_request.role,
-        added_by_id=UUID4(current_user.id),
+        added_by_id=current_user.id,
     )
 
 @router.delete("/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -461,7 +462,7 @@ def remove_project_member(
     project_service.remove_project_member(
         project_id=project_id,
         user_id=user_id,
-        removed_by_id=UUID4(current_user.id),
+        removed_by_id=current_user.id,
     )
     return None
 
@@ -619,7 +620,7 @@ def add_project_link(
     """
         Add a link to a project
     """
-    user_id = UUID4(member['user_id']) if isinstance(member['user_id'], str) else member['user_id']
+    user_id = as_uuid(member['user_id'])
     user_timezone = _get_user_timezone(user_id)
     link_service = LinkService(user_timezone)
     return link_service.create_link(link_request, project_id, LinkEntityType.PROJECT)
@@ -634,7 +635,7 @@ def get_project_links(
     """
         Get all links for a project with pagination
     """
-    user_id = UUID4(member['user_id']) if isinstance(member['user_id'], str) else member['user_id']
+    user_id = as_uuid(member['user_id'])
     user_timezone = _get_user_timezone(user_id)
     link_service = LinkService(user_timezone)
     return link_service.get_links(project_id, LinkEntityType.PROJECT, limit=limit, offset=offset)
@@ -649,7 +650,7 @@ def update_project_link(
     """
         Update a project link
     """
-    user_id = UUID4(member['user_id']) if isinstance(member['user_id'], str) else member['user_id']
+    user_id = as_uuid(member['user_id'])
     user_timezone = _get_user_timezone(user_id)
     link_service = LinkService(user_timezone)
     return link_service.update_link(link_id, link_request)
@@ -705,5 +706,5 @@ def get_project_summary(
     Cached: 5 minutes
     """
     project_service = ProjectService()
-    user_id = UUID4(member['user_id']) if isinstance(member['user_id'], str) else member['user_id']
+    user_id = as_uuid(member['user_id'])
     return project_service.get_project_summary(project_id, user_id=user_id)
