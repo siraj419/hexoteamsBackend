@@ -75,7 +75,7 @@ def accept_invitation(
     user_id = None
     if request.headers.get("Authorization"):
         user = get_current_user(request)
-        user_id = UUID4(user.id)
+        user_id = user.id
 
     return team_service.accept_invitation(accept_request, user_id)
 
