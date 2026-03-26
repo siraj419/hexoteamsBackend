@@ -51,7 +51,7 @@ class ConnectionManager:
     
     def _get_redis_key(self, key_type: str, identifier: str) -> str:
         """Build Redis key with namespace"""
-        return f"ws:{key_type}:{identifier}"
+        return f"wss{key_type}:{identifier}"
     
     def _store_connection_metadata(
         self, 
@@ -714,10 +714,10 @@ class ConnectionManager:
         if redis_client:
             try:
                 # Count connections by type from Redis
-                project_keys = list(redis_client.scan_iter(match="ws:project:*"))
-                dm_keys = list(redis_client.scan_iter(match="ws:dm:*"))
-                user_keys = list(redis_client.scan_iter(match="ws:user:*"))
-                inbox_keys = list(redis_client.scan_iter(match="ws:inbox:*"))
+                project_keys = list(redis_client.scan_iter(match="wssproject:*"))
+                dm_keys = list(redis_client.scan_iter(match="wssdm:*"))
+                user_keys = list(redis_client.scan_iter(match="wssuser:*"))
+                inbox_keys = list(redis_client.scan_iter(match="wssinbox:*"))
                 
                 stats["redis_project_rooms"] = len(project_keys)
                 stats["redis_dm_rooms"] = len(dm_keys)
