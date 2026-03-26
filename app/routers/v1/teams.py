@@ -71,16 +71,12 @@ def accept_invitation(
     Ensures idempotency and prevents duplicate memberships.
     """
     team_service = TeamService()
-    
-    # Try to get current user if authenticated, but don't require it
+
     user_id = None
-    try:
-        if request.headers.get("Authorization"):
-            user = get_current_user(request)
-            user_id = UUID4(user.id) if user and hasattr(user, 'id') else None
-    except:
-        pass  # User not authenticated, which is fine
-    
+    if request.headers.get("Authorization"):
+        user = get_current_user(request)
+        user_id = UUID4(user.id)
+
     return team_service.accept_invitation(accept_request, user_id)
 
 @router.delete('/{user_id}/remove', status_code=status.HTTP_204_NO_CONTENT)
