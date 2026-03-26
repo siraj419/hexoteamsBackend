@@ -718,13 +718,13 @@ class ChatService:
                         UPDATE chat_messages
                         SET read_by = CASE
                             WHEN read_by IS NULL THEN jsonb_build_array(:uid)
-                            WHEN NOT (read_by @> to_jsonb(:uid::text)) THEN read_by || to_jsonb(:uid::text)
+                            WHEN NOT (read_by @> to_jsonb(CAST(:uid AS TEXT))) THEN read_by || to_jsonb(CAST(:uid AS TEXT))
                             ELSE read_by
                         END
                         WHERE project_id = CAST(:pid AS uuid)
                           AND created_at <= :last_at
                           AND deleted_at IS NULL
-                          AND (read_by IS NULL OR NOT (read_by @> to_jsonb(:uid::text)))
+                          AND (read_by IS NULL OR NOT (read_by @> to_jsonb(CAST(:uid AS TEXT))))
                         """
                     ),
                     {
