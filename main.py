@@ -40,7 +40,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:8002", "http://localhost:3000", "https://hex-teams-frontend.vercel.app", "http://194.195.119.112:8080", "https://backend-hexoforgeteams.duckdns.org"],
+    allow_origins=["http://localhost:8080", "http://localhost:8002", "http://localhost:3000", "https://hex-teams-frontend.vercel.app", "http://194.195.119.112:8080", "https://backend-hexoforgeteams.duckdns.org", 'https://hexoteams.vercel.app'],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
