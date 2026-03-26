@@ -31,6 +31,7 @@ from app.schemas.chat import (
     WorkspaceUser,
 )
 from app.utils.uuid_compat import as_uuid
+from app.core import settings
 from app.services.chat import ChatService
 from app.services.files import FilesService
 from app.utils.websocket_manager import manager
@@ -557,14 +558,14 @@ async def upload_chat_attachment(
     """
     
     files_service = FilesService()
-    
-    MAX_FILE_SIZE = 100 * 1024 * 1024
+
+    max_bytes = settings.S3_MAX_FILE_SIZE_MB * 1024 * 1024
     file_content = await file.read()
-    
-    if len(file_content) > MAX_FILE_SIZE:
+
+    if len(file_content) > max_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File size exceeds maximum limit of {MAX_FILE_SIZE} bytes"
+            detail=f"File size exceeds maximum limit of {settings.S3_MAX_FILE_SIZE_MB} MB",
         )
     
     try:
@@ -578,6 +579,8 @@ async def upload_chat_attachment(
             reference_id
         )
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -10,6 +10,7 @@ from pydantic import UUID4
 from app.utils.uuid_compat import as_uuid
 from sqlalchemy import and_, delete, func, select, update
 
+from app.core import settings
 from app.core.s3 import S3ServiceException, s3_service
 from app.db.sync_session import SyncSessionLocal
 from app.models import ChatAttachment, ChatMessage, DirectMessage, File as FileModel, Profile, ProjectMember
@@ -712,7 +713,12 @@ class FilesService:
         try:
             attachment_id = uuid.uuid4()
             file_size = len(file_content)
-            
+            if not self.validate_file_size(file_size):
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File size exceeds maximum limit of {settings.S3_MAX_FILE_SIZE_MB} MB",
+                )
+
             file_extension = os.path.splitext(file_name)[1]
             
             year = datetime.now(timezone.utc).strftime('%Y')
