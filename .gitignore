@@ -1,7 +1,6 @@
 __pycache__/
 venv/
 *.sql
-!migrations/*.sql
 time_log_endpoints.txt
 test_websocket.py
 INBOX_IMPLEMENTATION_SUMMARY.md
@@ -13,3 +12,6 @@ DOCKER_SETUP.md
 
 # logs
 *.log
+
+# migrations
+migrations/*
