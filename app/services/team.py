@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 from pydantic import UUID4
 
 from app.utils.uuid_compat import as_uuid
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Set
 from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import delete, func, select, update
@@ -40,6 +40,30 @@ import logging
 logger = logging.getLogger(__name__)
 
 settings = Settings()
+
+
+def _normalize_invitation_email_list(value: Any) -> List[str]:
+    """
+    Invitation.email is ARRAY(Text) (list of addresses). Normalize to non-empty strings.
+    If the DB/driver returns a single string, do not use list(str) — that splits into characters
+    and breaks accept_invitation email checks.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        return [s] if s else []
+    out: List[str] = []
+    for item in value:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _invited_email_set(emails: List[str]) -> Set[str]:
+    return {e.strip().lower() for e in emails if e and str(e).strip()}
+
 
 class TeamService:
     CACHE_TTL_INVITATIONS = 180  # 3 minutes
@@ -184,10 +208,12 @@ class TeamService:
         if user_id:
             # Verify email matches (if user exists)
             user_email = self._get_user_email(user_id)
-            if user_email and user_email.lower() not in [e.lower() for e in invitation['email']]:
+            invited = _invited_email_set(invitation["email"])
+            user_norm = (user_email or "").strip().lower()
+            if user_norm and user_norm not in invited:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Email does not match invitation"
+                    detail="Email does not match invitation",
                 )
             
             # Mark invitation as accepted IMMEDIATELY to prevent concurrent processing
@@ -291,7 +317,7 @@ class TeamService:
         def _inv_dict(inv: Invitation) -> Dict[str, Any]:
             return {
                 "id": str(inv.id),
-                "email": list(inv.email),
+                "email": _normalize_invitation_email_list(inv.email),
                 "token": inv.token,
                 "invited_by": str(inv.invited_by) if inv.invited_by else None,
                 "accepted_at": inv.accepted_at.isoformat() if inv.accepted_at else None,
@@ -962,8 +988,8 @@ class TeamService:
 
         try:
             for inv in rows:
-                inv_emails = list(inv.email) if inv.email else []
-                existing_email_set = set(e.lower() for e in inv_emails if e)
+                inv_emails = _normalize_invitation_email_list(inv.email)
+                existing_email_set = {e.lower() for e in inv_emails}
                 inv_projects = inv.added_project_ids or []
                 existing_project_set = set(str(pid) for pid in inv_projects if pid)
                 emails_match = new_email_set == existing_email_set
@@ -1022,7 +1048,7 @@ class TeamService:
         invitation = {
             "id": str(row.id),
             "org_id": str(row.org_id),
-            "email": list(row.email),
+            "email": _normalize_invitation_email_list(row.email),
             "token": row.token,
             "as_admin": row.as_admin,
             "invited_by": str(row.invited_by) if row.invited_by else None,
