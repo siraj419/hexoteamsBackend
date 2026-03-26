@@ -42,7 +42,10 @@ from app.schemas.chat import (
 )
 from app.utils import apply_pagination, apply_sa_limit_offset
 from app.utils.redis_cache import UserCache, cache_service
-from app.utils.inbox_helpers import trigger_direct_message_notification
+from app.utils.inbox_helpers import (
+    trigger_direct_message_notification,
+    trigger_project_chat_message_notification,
+)
 from app.services.files import FilesService
 from app.core.config import Settings
 
@@ -314,7 +317,43 @@ class ChatService:
             message['read_by'] = self._normalize_read_by(message.get('read_by', []))
             
             self._enrich_message_with_user_info(message, user_id)
-            
+
+            try:
+                recipient_ids: List[str] = []
+                proj = None
+                db2 = SyncSessionLocal()
+                try:
+                    proj = db2.execute(
+                        select(Project).where(Project.id == project_id)
+                    ).scalar_one_or_none()
+                    if proj:
+                        member_rows = db2.execute(
+                            select(ProjectMember.user_id).where(
+                                ProjectMember.project_id == project_id
+                            )
+                        ).scalars().all()
+                        recipient_ids = [
+                            str(m) for m in member_rows if str(m) != str(user_id)
+                        ]
+                finally:
+                    db2.close()
+
+                if proj and recipient_ids:
+                    sender_profile = self.files_service._get_user_profile(user_id)
+                    sender_name = sender_profile.display_name or "Someone"
+                    preview = (message_data.body or "")[:500]
+                    trigger_project_chat_message_notification(
+                        recipient_user_ids=recipient_ids,
+                        project_id=project_id,
+                        org_id=proj.org_id,
+                        project_name=proj.name or "Project",
+                        sender_id=user_id,
+                        sender_name=sender_name,
+                        message_preview=preview,
+                    )
+            except Exception as e:
+                logger.error("Failed to send project chat inbox notification: %s", e, exc_info=True)
+
             return ProjectMessageResponse(**message)
             
         except HTTPException:

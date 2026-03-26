@@ -1,6 +1,6 @@
 from fastapi import HTTPException, status
 from pydantic import UUID4
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 import logging
 import asyncio
@@ -206,6 +206,35 @@ class NotificationService:
             event_type=InboxEventType.DIRECT_MESSAGE,
             reference_id=conversation_id,
         )
+
+    async def notify_project_chat_message(
+        self,
+        recipient_user_ids: List[UUID4],
+        project_id: UUID4,
+        org_id: UUID4,
+        project_name: str,
+        sender_id: UUID4,
+        sender_name: str,
+        message_preview: str,
+    ):
+        """Inbox + real-time browser notification only (no email), same channel as direct messages."""
+        title = f"New message in {project_name}"
+        preview = (message_preview or "").strip()
+        if not preview:
+            preview = "Sent an attachment"
+        body = preview[:100]
+        for uid in recipient_user_ids:
+            if str(uid) == str(sender_id):
+                continue
+            await self.send_inbox_notification(
+                title=title,
+                message=body,
+                user_id=uid,
+                org_id=org_id,
+                user_by=sender_id,
+                event_type=InboxEventType.PROJECT_MESSAGE,
+                reference_id=project_id,
+            )
 
     async def notify_task_completed(
         self,
@@ -428,7 +457,7 @@ class NotificationService:
         template_vars: Dict[str, Any],
         text_content: str,
     ):
-        if event_type == InboxEventType.DIRECT_MESSAGE:
+        if event_type in (InboxEventType.DIRECT_MESSAGE, InboxEventType.PROJECT_MESSAGE):
             return
 
         try:

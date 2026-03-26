@@ -170,6 +170,46 @@ def send_direct_message_notification(
         logger.error(f"Failed to send direct message notification: {str(e)}", exc_info=True)
 
 
+@celery_app.task(name='app.tasks.tasks.send_project_chat_message_notification')
+def send_project_chat_message_notification(
+    recipient_user_ids: list,
+    project_id: str,
+    org_id: str,
+    project_name: str,
+    sender_id: str,
+    sender_name: str,
+    message_preview: str,
+):
+    """Inbox + real-time notification for project chat recipients (no email)."""
+    try:
+        from app.services.notification import NotificationService
+
+        notification_service = NotificationService()
+        uids = [as_uuid(uid) for uid in recipient_user_ids]
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(
+            notification_service.notify_project_chat_message(
+                recipient_user_ids=uids,
+                project_id=as_uuid(project_id),
+                org_id=as_uuid(org_id),
+                project_name=project_name,
+                sender_id=as_uuid(sender_id),
+                sender_name=sender_name,
+                message_preview=message_preview or "",
+            )
+        )
+        loop.close()
+    except Exception as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"Failed to send project chat message notification: {str(e)}",
+            exc_info=True,
+        )
+
+
 @celery_app.task(name='app.tasks.tasks.send_task_completed_notification')
 def send_task_completed_notification(
     project_id: str,

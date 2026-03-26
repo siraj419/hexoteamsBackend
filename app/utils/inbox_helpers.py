@@ -8,6 +8,7 @@ from app.tasks.tasks import (
     send_task_assigned_notification,
     send_task_unassigned_notification,
     send_direct_message_notification,
+    send_project_chat_message_notification,
     send_task_completed_notification,
     send_project_member_added_notification,
 )
@@ -186,6 +187,52 @@ def trigger_direct_message_notification(
             )
         except Exception as fallback_error:
             logger.error(f"Failed to send direct message notification: {fallback_error}", exc_info=True)
+
+
+def trigger_project_chat_message_notification(
+    recipient_user_ids: list[str],
+    project_id: UUID4,
+    org_id: UUID4,
+    project_name: str,
+    sender_id: UUID4,
+    sender_name: str,
+    message_preview: str,
+):
+    """Project chat: inbox + real-time notification for each recipient (no email)."""
+    try:
+        send_project_chat_message_notification.delay(
+            recipient_user_ids=list(recipient_user_ids),
+            project_id=str(project_id),
+            org_id=str(org_id),
+            project_name=project_name,
+            sender_id=str(sender_id),
+            sender_name=sender_name,
+            message_preview=message_preview,
+        )
+    except Exception as e:
+        logger.warning(f"Celery task failed, using direct call: {e}")
+        try:
+            from app.services.notification import NotificationService
+            from app.utils.uuid_compat import as_uuid
+
+            notification_service = NotificationService()
+            uids = [as_uuid(x) for x in recipient_user_ids]
+            run_async_task(
+                notification_service.notify_project_chat_message(
+                    recipient_user_ids=uids,
+                    project_id=as_uuid(project_id),
+                    org_id=as_uuid(org_id),
+                    project_name=project_name,
+                    sender_id=as_uuid(sender_id),
+                    sender_name=sender_name,
+                    message_preview=message_preview,
+                )
+            )
+        except Exception as fallback_error:
+            logger.error(
+                f"Failed to send project chat inbox notification: {fallback_error}",
+                exc_info=True,
+            )
 
 
 def trigger_task_completed_notification(
